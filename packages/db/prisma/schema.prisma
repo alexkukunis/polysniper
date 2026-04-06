@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Trade {
+  id             String    @id @default(cuid())
+  asset          String    // "BTC" | "ETH" | "SOL"
+  marketId       String
+  assetId        String
+  window         String    // "5min" | "15min" | "1hour"
+  direction      String    // "UP" | "DOWN"
+  entryPrice     Float     // price paid per share
+  exitPrice      Float?
+  priceToBeat    Float     // opening reference price for window
+  chainlinkAt    Float     // oracle price when signal fired
+  polymarketAt   Float     // polymarket price at entry
+  edge           Float     // implied prob - market price
+  size           Float     // USDC amount
+  shares         Float     // shares bought = size / entryPrice
+  orderId        String?   // Polymarket order ID
+  status         String    // "OPEN" | "CLOSED" | "RESOLVED"
+  closeReason    String?   // "TARGET" | "STOP" | "RESOLUTION" | "EXPIRY"
+  pnl            Float?
+  outcome        String?   // "WIN" | "LOSS"
+  resolvedAt     DateTime?
+  windowEndsAt   DateTime  // when this window closes
+  paperTrade     Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model DailyStats {
+  id        String   @id @default(cuid())
+  date      DateTime @unique
+  trades    Int      @default(0)
+  wins      Int      @default(0)
+  losses    Int      @default(0)
+  pnl       Float    @default(0)
+  winRate   Float    @default(0)
+  paused    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model BotState {
+  id            String   @id @default("singleton")
+  running       Boolean  @default(true)
+  paperMode     Boolean  @default(true)  // START IN PAPER MODE
+  pausedReason  String?
+  bankroll      Float
+  dailyPnl      Float    @default(0)
+  totalPnl      Float    @default(0)
+  lastHeartbeat DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Market {
+  id           String   @id
+  asset        String   // "BTC" | "ETH" | "SOL"
+  window       String   // "5min" | "15min" | "1hour"
+  question     String
+  conditionId  String
+  upTokenId    String
+  downTokenId  String
+  priceToBeat  Float?
+  windowEndsAt DateTime
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
