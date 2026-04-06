@@ -3,11 +3,9 @@ import { sendAlert } from './alerts'
 
 const DAILY_LOSS_LIMIT_PCT = 0.03  // pause if down 3% in a day
 const MAX_POSITION_PCT = 0.05      // max 5% of bankroll per position
-const MAX_OPEN_POSITIONS = 10
 const MIN_TRADE_SIZE = 10          // minimum $10 per trade
 
 export class RiskManager {
-  private openCount = 0
   private dailyPnl = 0
   private paused = false
 
@@ -18,9 +16,9 @@ export class RiskManager {
   private async syncFromDb() {
     try {
       const s = await db.botState.findUnique({ where: { id: 'singleton' } })
-      if (s) { 
+      if (s) {
         this.dailyPnl = s.dailyPnl
-        this.bankroll = s.bankroll 
+        this.bankroll = s.bankroll
       }
     } catch (err) {
       console.error('Failed to sync risk state from DB:', err)
@@ -32,10 +30,6 @@ export class RiskManager {
       console.log('⛔ Risk: bot is paused')
       return null
     }
-    if (this.openCount >= MAX_OPEN_POSITIONS) {
-      console.log(`⛔ Risk: max positions reached (${MAX_OPEN_POSITIONS})`)
-      return null
-    }
 
     const lossLimit = this.bankroll * DAILY_LOSS_LIMIT_PCT
     if (this.dailyPnl < -lossLimit) {
@@ -44,8 +38,6 @@ export class RiskManager {
     }
 
     // Half-Kelly formula for position sizing
-    // Kelly % = (bp - q) / b where b = odds, p = true prob, q = 1-p
-    // Simplified: edge / (1 - edge) ≈ edge for small edges
     const kelly = edge / (1 - edge)
     const halfKelly = kelly * 0.5
     const maxSize = this.bankroll * MAX_POSITION_PCT
@@ -57,16 +49,11 @@ export class RiskManager {
       return null
     }
 
-    this.openCount++
     return rounded
   }
 
-  onPositionClose() { 
-    this.openCount = Math.max(0, this.openCount - 1) 
-  }
-
-  onPnlUpdate(delta: number) { 
-    this.dailyPnl += delta 
+  updatePnl(delta: number) {
+    this.dailyPnl += delta
   }
 
   resetDaily() {
@@ -89,5 +76,5 @@ export class RiskManager {
   }
 
   isPaused() { return this.paused }
-  getOpenCount() { return this.openCount }
+  getDailyPnl() { return this.dailyPnl }
 }

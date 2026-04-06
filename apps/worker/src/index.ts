@@ -2,13 +2,15 @@ import { resolve } from 'path'
 import { config } from 'dotenv'
 config({ path: resolve(__dirname, '../../../.env') })
 
-import { ChainlinkListener } from './chainlink'
-import { PolymarketClient } from './polymarket'
-import { StrategyEngine } from './strategy'
-import { Executor } from './executor'
-import { Monitor } from './monitor'
-import { Scanner } from './scanner'
+import { KalshiClient } from './kalshi'
+import { KalshiRestClient } from './kalshi-rest'
+import { ParityScanner } from './parity-scanner'
+import { KalshiOrderbookEngine } from './kalshi-orderbook'
+import { ParityStrategyEngine } from './parity-strategy'
+import { ParityExecutor } from './parity-executor'
+import { BalanceMonitor } from './balance-monitor'
 import { RiskManager } from './risk'
+import { RealTimeBridge } from './realtime-bridge'
 import { db } from '@repo/db'
 import { sendAlert } from './alerts'
 import http from 'http'
@@ -16,41 +18,73 @@ import http from 'http'
 // Configuration from environment
 const bankroll = parseFloat(process.env.BANKROLL_USDC || '1000')
 const paperMode = process.env.PAPER_MODE !== 'false' // default to true
+const isDemo = process.env.KALSHI_DEMO !== 'false' // default to demo
+const dryRun = process.env.DRY_RUN !== 'false' // DRY_RUN by default
+
+// Kalshi API credentials
+const kalshiAccessKey = process.env.KALSHI_ACCESS_KEY || ''
+const kalshiPrivateKey = process.env.KALSHI_PRIVATE_KEY || ''
 
 async function main() {
-  console.log('🚀 Starting PolyMarket Oracle Lag Bot...')
+  console.log('🚀 Starting Kalshi YES/NO Parity Arbitrage Bot...')
   console.log(`   Bankroll: $${bankroll}`)
   console.log(`   Mode: ${paperMode ? 'PAPER' : 'LIVE'}`)
+  console.log(`   Environment: ${isDemo ? 'DEMO' : 'PRODUCTION'}`)
+  console.log(`   DRY_RUN: ${dryRun ? 'YES (logging only)' : 'NO (executing trades)'}`)
 
   // Initialize bot state in DB
   await db.botState.upsert({
     where: { id: 'singleton' },
-    create: { 
-      id: 'singleton', 
-      bankroll, 
-      running: true, 
+    create: {
+      id: 'singleton',
+      bankroll,
+      running: true,
       paperMode,
       dailyPnl: 0,
       totalPnl: 0,
     },
-    update: { 
-      running: true, 
-      pausedReason: null, 
-      lastHeartbeat: new Date(), 
+    update: {
+      running: true,
+      pausedReason: null,
+      lastHeartbeat: new Date(),
       paperMode,
     },
   })
 
-  const risk = new RiskManager(bankroll)
-  const executor = new Executor(paperMode)
-  const chainlink = new ChainlinkListener()
-  const polymarket = new PolymarketClient()
-  const scanner = new Scanner(polymarket)
-  const monitor = new Monitor(executor, polymarket, risk)
-  const strategy = new StrategyEngine(risk, executor, chainlink)
+  // Initialize Kalshi clients
+  const kalshiWsClient = new KalshiClient(kalshiAccessKey, kalshiPrivateKey, isDemo)
+  const kalshiRestClient = new KalshiRestClient(kalshiAccessKey, kalshiPrivateKey, isDemo)
 
-  // Wire executor <-> polymarket client
-  executor.setPolymarketClient(polymarket)
+  // Initialize core components — YES/NO Parity Arbitrage
+  const risk = new RiskManager(bankroll)
+  const executor = new ParityExecutor(dryRun, paperMode)
+  const orderbook = new KalshiOrderbookEngine()
+  const strategy = new ParityStrategyEngine(risk, executor, orderbook)
+  const scanner = new ParityScanner(kalshiRestClient, isDemo)
+  const balanceMonitor = new BalanceMonitor(kalshiRestClient)
+  const realtimeBridge = new RealTimeBridge(3002, '/ws-realtime')
+
+  // Wire executor <-> Kalshi REST client
+  executor.setKalshiClient(kalshiRestClient)
+
+  // Wire executor -> real-time bridge for event-driven dashboard updates
+  executor.onTrade(async (trade) => {
+    await realtimeBridge.broadcastTrade(trade)
+    await realtimeBridge.broadcastStateUpdate()
+  })
+
+  // Wire executor PnL updates -> risk manager (daily loss limit tracking)
+  executor.setPnlCallback((pnl: number) => {
+    risk.updatePnl(pnl)
+  })
+
+  // Wire scanner -> real-time bridge for opportunity events
+  scanner.onOpportunityFound(async (opportunity) => {
+    await realtimeBridge.broadcastOpportunity(opportunity)
+  })
+
+  // Start real-time bridge for event-driven dashboard updates
+  await realtimeBridge.start()
 
   // Heartbeat every 30s
   setInterval(async () => {
@@ -77,31 +111,70 @@ async function main() {
   // Health check endpoint for Railway
   http.createServer((_, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ status: 'ok', paperMode, bankroll }))
+    res.end(JSON.stringify({
+      status: 'ok',
+      paperMode,
+      bankroll,
+      dryRun,
+      exchange: 'kalshi',
+      strategy: 'YES/NO Parity Arbitrage',
+    }))
   }).listen(process.env.PORT || 3001)
 
-  // Wire Chainlink → Strategy
-  chainlink.on('price', (update: any) => {
-    strategy.onChainlinkUpdate(update)
+  // ── Wire Kalshi WebSocket → Orderbook Engine ──
+
+  kalshiWsClient.on('ticker', (ticker: any) => {
+    orderbook.handleTicker(ticker)
+    strategy.onTickerUpdate(ticker)
   })
 
-  // Wire Polymarket book → Strategy
-  polymarket.on('book', (update: any) => {
-    strategy.onPolymarketUpdate(update)
+  kalshiWsClient.on('orderbook_snapshot', (snapshot: any) => {
+    orderbook.handleSnapshot(snapshot)
   })
 
-  // Start all services
-  await scanner.start()        // discover active windows
-  await chainlink.start()      // subscribe to BTC/ETH/SOL oracles
-  await polymarket.start()     // subscribe to market orderbooks
-  monitor.start()              // poll open trades every 10s
+  kalshiWsClient.on('orderbook_delta', (delta: any) => {
+    orderbook.handleDelta(delta)
+  })
 
-  await sendAlert(`✅ Bot live | Paper: ${paperMode} | Bankroll: $${bankroll}`)
-  console.log(`✅ All systems live | Paper mode: ${paperMode}`)
+  kalshiWsClient.on('fill', (fill: any) => {
+    console.log('📋 Fill received:', fill)
+    // Update parity trade fill status
+    strategy.onTradeComplete()
+  })
+
+  // ── Start all services ──
+
+  await scanner.start()           // Discover active binary markets (REST, every 2min)
+  await kalshiWsClient.start()    // Connect to Kalshi WebSocket
+
+  // Auto-subscribe to new markets as they're discovered by scanner
+  scanner.onNewMarketsDiscovered((tickers: string[]) => {
+    kalshiWsClient.subscribe(tickers)
+    console.log(`📡 Auto-subscribed to ${tickers.length} new markets via WebSocket`)
+  })
+
+  // Wait a moment for initial market discovery, then subscribe to all known markets
+  setTimeout(async () => {
+    const tickers = [...orderbook.getAllOrderbooks().keys()]
+    if (tickers.length > 0) {
+      kalshiWsClient.subscribe(tickers)
+      console.log(`📋 Subscribed to ${tickers.length} markets via WebSocket`)
+    }
+  }, 5000)
+
+  strategy.start()                // Start parity scanner (scans orderbook cache every 500ms)
+  balanceMonitor.start()          // Check balance hourly
+
+  await sendAlert(
+    `✅ Kalshi Parity Bot live | Paper: ${paperMode} | DRY_RUN: ${dryRun} | Bankroll: $${bankroll} | ${isDemo ? 'DEMO' : 'LIVE'}`
+  )
+  console.log(
+    `✅ All systems live | Paper: ${paperMode} | DRY_RUN: ${dryRun} | Exchange: Kalshi | Strategy: YES/NO Parity Arbitrage`
+  )
 }
 
 main().catch(async err => {
   console.error('Fatal:', err)
-  await sendAlert(`🚨 Bot crashed: ${err.message}`)
+  await sendAlert(`🚨 Kalshi Parity Bot crashed: ${err.message}`)
   process.exit(1)
 })

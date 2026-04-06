@@ -7,86 +7,116 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Trade {
-  id             String    @id @default(cuid())
-  asset          String    // "BTC" | "ETH" | "SOL"
-  marketId       String
-  assetId        String
-  window         String    // "5min" | "15min" | "1hour"
-  direction      String    // "UP" | "DOWN"
-  entryPrice     Float     // price paid per share
-  exitPrice      Float?
-  priceToBeat    Float     // opening reference price for window
-  chainlinkAt    Float     // oracle price when signal fired
-  polymarketAt   Float     // polymarket price at entry
-  edge           Float     // implied prob - market price
-  size           Float     // USDC amount
-  shares         Float     // shares bought = size / entryPrice
-  orderId        String?   // Polymarket order ID
-  status         String    // "OPEN" | "CLOSED" | "RESOLVED"
-  closeReason    String?   // "TARGET" | "STOP" | "RESOLUTION" | "EXPIRY"
-  pnl            Float?
-  outcome        String?   // "WIN" | "LOSS"
-  resolvedAt     DateTime?
-  windowEndsAt   DateTime  // when this window closes
-  paperTrade     Boolean   @default(false)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-}
-
 model DailyStats {
-  id        String   @id @default(cuid())
-  date      DateTime @unique
-  trades    Int      @default(0)
-  wins      Int      @default(0)
-  losses    Int      @default(0)
-  pnl       Float    @default(0)
-  winRate   Float    @default(0)
-  paused    Boolean  @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                String   @id @default(cuid())
+  date              DateTime @unique
+  parityTrades      Int      @default(0) // completed dual-leg fills
+  opportunitiesSeen Int      @default(0) // total opportunities detected
+  wins              Int      @default(0)
+  losses            Int      @default(0)
+  pnl               Float    @default(0)
+  totalVolume       Float    @default(0) // total $ volume traded
+  avgCombinedCost   Float    @default(0) // average yesAsk + noAsk
+  bestProfit        Float    @default(0) // best single trade profit
+  paused            Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }
 
 model BotState {
-  id            String   @id @default("singleton")
-  running       Boolean  @default(true)
-  paperMode     Boolean  @default(true)  // START IN PAPER MODE
-  pausedReason  String?
-  bankroll      Float
-  dailyPnl      Float    @default(0)
-  totalPnl      Float    @default(0)
-  lastHeartbeat DateTime @default(now())
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-}
-
-model Market {
-  id           String   @id
-  asset        String   // "BTC" | "ETH" | "SOL"
-  window       String   // "5min" | "15min" | "1hour"
-  question     String
-  conditionId  String
-  upTokenId    String
-  downTokenId  String
-  priceToBeat  Float?
-  windowEndsAt DateTime
-  active       Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id                  String   @id @default("singleton")
+  running             Boolean  @default(true)
+  paperMode           Boolean  @default(true)  // START IN PAPER MODE
+  dryRun              Boolean  @default(true)  // DRY_RUN by default
+  pausedReason        String?
+  bankroll            Float
+  dailyPnl            Float    @default(0)
+  totalPnl            Float    @default(0)
+  marketsScanned      Int      @default(0)  // binary markets discovered
+  activeSubscriptions Int      @default(0)  // WebSocket market subscriptions
+  openParityPositions Int      @default(0)  // currently open dual-leg positions
+  lastHeartbeat       DateTime @default(now())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 }
 
 model Config {
-  id              String   @id @default("singleton")
-  polyApiKey      String?
-  polyApiSecret   String?
-  polyPassphrase  String?
-  walletPrivateKey  String?
-  polygonRpc      String?
-  polygonWssRpc   String?
-  telegramBotToken String?
-  telegramChatId  String?
-  bankrollUsdc    Float    @default(1000)
-  paperMode       Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id                String   @id @default("singleton")
+  kalshiAccessKey   String?  // Kalshi API access key ID
+  kalshiPrivateKey  String?  // Kalshi API private key (PEM format)
+  kalshiApiUrl      String?  // API base URL (demo or production)
+  kalshiWsUrl       String?  // WebSocket URL
+  kalshiDemo        Boolean  @default(true)  // Demo vs production environment
+  telegramBotToken  String?
+  telegramChatId    String?
+  bankrollUsdc      Float    @default(1000)
+  paperMode         Boolean  @default(true)
+  // Strategy parameters (editable via UI)
+  minProfitCents            Float    @default(1.5)   // Minimum profit to trigger trade
+  scanIntervalMs            Int      @default(500)    // Orderbook scan interval
+  marketDiscoveryIntervalMs Int      @default(120000) // Market discovery interval
+  maxConcurrentTrades       Int      @default(5)      // Max concurrent parity trades
+  maxPositionPct            Float    @default(5)      // Max position as % of bankroll
+  dailyLossPct              Float    @default(3)      // Daily loss limit as %
+  minTradeSizeUsd           Float    @default(10)     // Minimum trade size in USD
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model ParityTrade {
+  id              String    @id @default(cuid())
+  // Market info
+  eventTicker     String    // e.g., "BTC-24DEC31"
+  marketTicker    String    // YES market ticker
+  yesTicker       String    // YES market ticker
+  noTicker        String    // NO market ticker (derived)
+  asset           String    // "BTC" | "ETH" | "SOL"
+  // Pricing at trigger
+  yesBid          Float     // YES best bid (cents)
+  noBid           Float     // NO best bid (cents) = 100 - YES ask
+  yesAsk          Float     // YES best ask (cents)
+  noAsk           Float     // NO best ask (cents) = 100 - YES bid
+  combinedCost    Float     // yesAsk + noAsk (what we'd pay)
+  guaranteedProfit Float    // 100 - combinedCost (before fees)
+  estimatedFees   Float?    // estimated fees in dollars
+  // Execution
+  count           Int       // number of contracts
+  dryRun          Boolean   @default(true)  // DRY_RUN by default
+  yesOrderId      String?   // YES leg order ID
+  noOrderId       String?   // NO leg order ID
+  yesFilled       Boolean   @default(false)
+  noFilled        Boolean   @default(false)
+  yesFillPrice    Float?    // actual fill price for YES
+  noFillPrice     Float?    // actual fill price for NO
+  actualCost      Float?    // actual combined cost if both filled
+  actualProfit    Float?    // 100 - actualCost
+  actualFees      Float?    // actual fees paid in dollars
+  // Status
+  status          String    @default("TRIGGERED")  // TRIGGERED | ORDERED | PARTIAL_FILL | FILLED | CANCELLED | EXPIRED
+  closeReason     String?   // why cancelled/expired
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  expiresAt       DateTime  // when market settles / order expires
+
+  @@index([status])
+  @@index([dryRun])
+  @@index([createdAt])
+}
+
+model ParityOpportunity {
+  id              String    @id @default(cuid())
+  eventTicker     String
+  marketTicker    String
+  asset           String
+  yesBid          Float
+  noBid           Float
+  yesAsk          Float
+  noAsk           Float
+  combinedCost    Float     // yesAsk + noAsk
+  guaranteedProfit Float    // 100 - combinedCost
+  triggered       Boolean   @default(false)  // did we try to trade it?
+  createdAt       DateTime  @default(now())
+
+  @@index([createdAt])
+  @@index([triggered])
 }
