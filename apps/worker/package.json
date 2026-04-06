@@ -1,18 +1,19 @@
 {
   "name": "@repo/worker",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
+  "description": "Kalshi Crypto Prediction Market Trading Bot",
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc --noEmit"
   },
   "dependencies": {
-    "@polymarket/clob-client": "^4.0.0",
     "@repo/db": "workspace:*",
+    "@types/uuid": "^11.0.0",
     "dotenv": "^17.4.1",
-    "ethers": "^6.0.0",
     "tsx": "^4.0.0",
+    "uuid": "^13.0.0",
     "ws": "^8.0.0"
   },
   "devDependencies": {

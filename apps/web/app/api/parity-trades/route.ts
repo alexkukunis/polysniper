@@ -3,6 +3,9 @@ import { NextResponse } from 'next/server'
 
 export const dynamic = 'force-dynamic'
 
+/**
+ * GET /api/parity-trades — Fetch parity trade history (last 100)
+ */
 export async function GET() {
   try {
     const trades = await db.parityTrade.findMany({

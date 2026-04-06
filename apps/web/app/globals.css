@@ -4,62 +4,82 @@
 
 @layer base {
   * {
-    border-color: rgba(63, 63, 70, 0.5);
+    border-color: rgba(255, 255, 255, 0.08);
   }
 
   body {
-    background-color: #0a0a0b;
-    color: #fafafa;
+    background-color: #171717;
+    color: #ededed;
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
   ::selection {
-    background-color: rgba(99, 102, 241, 0.3);
-    color: #fafafa;
+    background-color: rgba(168, 85, 247, 0.3);
+    color: #ededed;
   }
 }
 
 @layer components {
+  /* Cards - clean, minimal elevation */
   .card {
-    @apply bg-surface border border-border rounded-xl shadow-card transition-all duration-200;
+    @apply bg-[#1e1e1e] border border-white/10 rounded-xl transition-all duration-200;
   }
 
   .card-hover {
-    @apply hover:bg-surface-hover hover:border-border-light hover:shadow-card-hover;
+    @apply hover:bg-[#252525] hover:border-white/15;
   }
 
+  /* Buttons - subtle, refined */
   .btn {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-accent/50 disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 
+           focus:outline-none focus:ring-2 focus:ring-purple-500/50 disabled:opacity-50 disabled:cursor-not-allowed
+           active:scale-[0.98];
   }
 
   .btn-primary {
-    @apply bg-accent hover:bg-accent-hover text-white shadow-glow hover:shadow-glow-lg;
+    @apply bg-white hover:bg-gray-100 text-gray-900 shadow-sm hover:shadow-md;
   }
 
   .btn-secondary {
-    @apply bg-surface border border-border hover:bg-surface-hover hover:border-border-light text-gray-300;
+    @apply bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-gray-300 hover:text-white;
   }
 
+  .btn-success {
+    @apply bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm;
+  }
+
+  .btn-danger {
+    @apply bg-red-600 hover:bg-red-500 text-white shadow-sm;
+  }
+
+  /* Inputs - clean, minimal */
   .input {
-    @apply w-full px-4 py-2.5 bg-surface border border-border rounded-lg text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent/50 transition-all duration-200;
+    @apply w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-lg text-gray-100 
+           placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 
+           transition-all duration-200;
   }
 
+  .input:focus {
+    @apply bg-white/[0.07];
+  }
+
+  /* Badges - subtle status indicators */
   .badge {
     @apply inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full;
   }
 
   .badge-success {
-    @apply bg-success-muted text-success ring-1 ring-inset ring-success/20;
+    @apply bg-emerald-500/10 text-emerald-400 ring-1 ring-inset ring-emerald-500/20;
   }
 
   .badge-danger {
-    @apply bg-danger-muted text-danger ring-1 ring-inset ring-danger/20;
+    @apply bg-red-500/10 text-red-400 ring-1 ring-inset ring-red-500/20;
   }
 
   .badge-warning {
-    @apply bg-warning-muted text-warning ring-1 ring-inset ring-warning/20;
+    @apply bg-amber-500/10 text-amber-400 ring-1 ring-inset ring-amber-500/20;
   }
 
   .badge-info {
@@ -69,31 +89,60 @@
 
 @layer utilities {
   .text-gradient {
-    @apply bg-gradient-to-r from-accent to-purple-400 bg-clip-text text-transparent;
+    @apply bg-gradient-to-r from-white via-gray-200 to-gray-400 bg-clip-text text-transparent;
+  }
+
+  .glow-purple {
+    box-shadow: 0 0 20px rgba(168, 85, 247, 0.15);
+  }
+
+  .glow-green {
+    box-shadow: 0 0 20px rgba(34, 197, 94, 0.15);
   }
 }
 
-/* Custom scrollbar for dark theme */
+/* Custom scrollbar - minimal, modern */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0a0a0b;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #27272a;
-  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
   transition: background 0.2s;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3f3f46;
+  background: rgba(255, 255, 255, 0.2);
 }
 
 /* Smooth scrolling */
 html {
   scroll-behavior: smooth;
+}
+
+/* Table styles - clean, minimal */
+table {
+  @apply border-collapse;
+}
+
+table thead th {
+  @apply text-xs font-medium text-gray-500 uppercase tracking-wider text-left px-6 py-3 border-b border-white/10 bg-white/[0.02];
+}
+
+table tbody td {
+  @apply px-6 py-4 border-b border-white/5;
+}
+
+table tbody tr {
+  @apply transition-colors duration-150;
+}
+
+table tbody tr:hover {
+  @apply bg-white/[0.03];
 }

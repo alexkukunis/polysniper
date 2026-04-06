@@ -16,32 +16,85 @@ interface WSClient extends WebSocket {
   isAlive?: boolean
 }
 
+// Worker's real-time bridge URL
+const WORKER_RT_URL = process.env.WORKER_RT_URL || 'ws://localhost:3002/ws-realtime'
+
 app.prepare().then(() => {
   const server = createServer((req, res) => {
     const parsedUrl = parse(req.url!, true)
     handle(req, res, parsedUrl)
   })
 
-  // WebSocket server for real-time dashboard updates
+  // WebSocket server for dashboard clients
   const wss = new WebSocketServer({ server, path: '/ws' })
 
+  // Connection to worker's real-time bridge
+  let workerWs: WebSocket | null = null
+  let dashboardClients = new Set<WSClient>()
+
+  function connectToWorker() {
+    console.log(`🔌 Connecting to worker real-time bridge: ${WORKER_RT_URL}`)
+    
+    workerWs = new WebSocket(WORKER_RT_URL)
+
+    workerWs.on('open', () => {
+      console.log('✅ Connected to worker real-time bridge')
+    })
+
+    workerWs.on('message', (data: Buffer) => {
+      try {
+        const event = JSON.parse(data.toString())
+        // Forward worker events to all dashboard clients
+        const message = JSON.stringify(event)
+        dashboardClients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(message)
+          }
+        })
+      } catch (err) {
+        console.error('❌ Failed to parse worker event:', err)
+      }
+    })
+
+    workerWs.on('close', () => {
+      console.log('⚠️ Worker disconnected — reconnecting in 3s...')
+      setTimeout(connectToWorker, 3000)
+    })
+
+    workerWs.on('error', (err) => {
+      console.error('❌ Worker WebSocket error:', err.message)
+    })
+  }
+
+  // Connect to worker on startup
+  connectToWorker()
+
+  // Handle dashboard client connections
   wss.on('connection', (ws: WSClient) => {
     ws.isAlive = true
-    console.log('🔌 Dashboard client connected')
+    dashboardClients.add(ws)
+    console.log(`🔌 Dashboard client connected (${dashboardClients.size} total)`)
 
-    // Send initial state immediately
-    sendUpdate(ws)
+    // Send initial state from DB immediately
+    sendInitialState(ws)
 
     ws.on('pong', () => {
       ws.isAlive = true
     })
+
+    ws.on('close', () => {
+      dashboardClients.delete(ws)
+      console.log(`⚠️ Dashboard client disconnected (${dashboardClients.size} total)`)
+    })
   })
 
-  // Keep-alive ping every 30s
+  // Keep-alive ping for dashboard clients every 30s
   const pingInterval = setInterval(() => {
-    wss.clients.forEach((ws: WSClient) => {
+    dashboardClients.forEach((ws) => {
       if (ws.isAlive === false) {
-        return ws.terminate()
+        ws.terminate()
+        dashboardClients.delete(ws)
+        return
       }
       ws.isAlive = false
       ws.ping()
@@ -52,41 +105,28 @@ app.prepare().then(() => {
     clearInterval(pingInterval)
   })
 
-  // Broadcast updates to all connected clients every 3 seconds
-  const broadcastInterval = setInterval(() => {
-    broadcastUpdate()
-  }, 3000)
-
-  async function sendUpdate(ws: WebSocket) {
+  async function sendInitialState(ws: WebSocket) {
     try {
-      const [state, today, trades] = await Promise.all([
+      const [state, today, parityTrades, parityOpportunities] = await Promise.all([
         db.botState.findUnique({ where: { id: 'singleton' } }),
         db.dailyStats.findFirst({ orderBy: { date: 'desc' } }),
-        db.trade.findMany({ orderBy: { createdAt: 'desc' }, take: 30 }),
+        db.parityTrade.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }).catch(() => []),
+        db.parityOpportunity.findMany({ orderBy: { createdAt: 'desc' }, take: 10 }).catch(() => []),
       ])
-      ws.send(JSON.stringify({ state, today, trades }))
-    } catch {}
-  }
-
-  async function broadcastUpdate() {
-    try {
-      const [state, today, trades] = await Promise.all([
-        db.botState.findUnique({ where: { id: 'singleton' } }),
-        db.dailyStats.findFirst({ orderBy: { date: 'desc' } }),
-        db.trade.findMany({ orderBy: { createdAt: 'desc' }, take: 30 }),
-      ])
-      const data = JSON.stringify({ state, today, trades })
-      wss.clients.forEach((client: WebSocket) => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(data)
-        }
-      })
-    } catch {}
+      
+      ws.send(JSON.stringify({
+        type: 'initial_state',
+        data: { state, today, parityTrades, parityOpportunities },
+        timestamp: Date.now(),
+      }))
+    } catch (err) {
+      console.error('❌ Failed to send initial state:', err)
+    }
   }
 
   const PORT = process.env.PORT || 3000
   server.listen(PORT, () => {
     console.log(`🚀 Dashboard live at http://localhost:${PORT}`)
-    console.log(`🔌 WebSocket at ws://localhost:${PORT}/ws`)
+    console.log(`🔌 Dashboard WebSocket at ws://localhost:${PORT}/ws`)
   })
 })

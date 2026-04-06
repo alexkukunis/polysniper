@@ -10,6 +10,7 @@ datasource db {
 model DailyStats {
   id                String   @id @default(cuid())
   date              DateTime @unique
+  // Parity strategy stats (legacy)
   parityTrades      Int      @default(0) // completed dual-leg fills
   opportunitiesSeen Int      @default(0) // total opportunities detected
   wins              Int      @default(0)
@@ -18,6 +19,16 @@ model DailyStats {
   totalVolume       Float    @default(0) // total $ volume traded
   avgCombinedCost   Float    @default(0) // average yesAsk + noAsk
   bestProfit        Float    @default(0) // best single trade profit
+  // Market Maker stats (hybrid mode)
+  startingBalance   Float    @default(0)  // bankroll at start of day
+  currentPnl        Float    @default(0)  // running daily PnL in cents
+  tradesCount       Int      @default(0)  // total fills today
+  ordersPlaced      Int      @default(0)  // total orders placed
+  ordersCanceled    Int      @default(0)  // total orders canceled
+  feesPaid          Float    @default(0)  // total fees paid in cents
+  maxDrawdown       Float    @default(0)  // max drawdown in cents
+  peakPnl           Float    @default(0)  // peak daily PnL in cents
+  // General
   paused            Boolean  @default(false)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
@@ -51,10 +62,18 @@ model Config {
   telegramChatId    String?
   bankrollUsdc      Float    @default(1000)
   paperMode         Boolean  @default(true)
-  // Strategy parameters (editable via UI)
-  minProfitCents            Float    @default(1.5)   // Minimum profit to trigger trade
-  scanIntervalMs            Int      @default(500)    // Orderbook scan interval
-  marketDiscoveryIntervalMs Int      @default(120000) // Market discovery interval
+  // Bot mode: "hybrid" = market making, "parity" = legacy YES/NO arbitrage
+  botMode           String   @default("hybrid")
+  // Market Maker strategy parameters
+  mmMinVolume24h    Int      @default(15000)   // min 24h volume to qualify a market
+  mmMaxSpread       Int      @default(4)       // max bid-ask spread to quote (cents)
+  mmBaseSpreadCents Int      @default(2)       // target spread per quote (cents)
+  mmOrderSize       Int      @default(20)      // contracts per side per order
+  mmMaxMarkets      Int      @default(3)       // max markets to quote simultaneously
+  // Legacy Parity parameters (kept for backward compatibility)
+  minProfitCents            Float    @default(1.5)   // Minimum profit to trigger trade (parity)
+  scanIntervalMs            Int      @default(500)    // Orderbook scan interval (parity)
+  marketDiscoveryIntervalMs Int      @default(120000) // Market discovery interval (parity)
   maxConcurrentTrades       Int      @default(5)      // Max concurrent parity trades
   maxPositionPct            Float    @default(5)      // Max position as % of bankroll
   dailyLossPct              Float    @default(3)      // Daily loss limit as %
