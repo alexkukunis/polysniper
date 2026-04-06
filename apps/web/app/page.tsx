@@ -1,13 +1,52 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 
 export default function Dashboard() {
   const [d, setD] = useState<any>(null)
+  const [wsStatus, setWsStatus] = useState<'connected' | 'disconnected' | 'connecting'>('connecting')
+  const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
-    const es = new EventSource('/api/stream')
-    es.onmessage = e => setD(JSON.parse(e.data))
-    return () => es.close()
+    let reconnectTimer: NodeJS.Timeout
+    let ws: WebSocket
+
+    function connect() {
+      setWsStatus('connecting')
+      // Detect protocol: if page is HTTPS, use WSS; if HTTP, use WS
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsUrl = `${protocol}//${window.location.host}/ws`
+      ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        setWsStatus('connected')
+        console.log('🔌 WebSocket connected')
+      }
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data)
+          setD(data)
+        } catch {}
+      }
+
+      ws.onclose = () => {
+        setWsStatus('disconnected')
+        console.log('⚠️ WebSocket disconnected, reconnecting in 3s...')
+        reconnectTimer = setTimeout(connect, 3000)
+      }
+
+      ws.onerror = () => {
+        setWsStatus('disconnected')
+      }
+    }
+
+    connect()
+
+    return () => {
+      clearTimeout(reconnectTimer)
+      ws?.close()
+    }
   }, [])
 
   const state = d?.state
@@ -20,17 +59,30 @@ export default function Dashboard() {
       <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-2xl font-bold">🎯 PolyMarket Oracle Lag Bot</h1>
-          <span
-            className={`text-xs px-3 py-1 rounded-full font-bold ${
-              state?.paperMode
-                ? 'bg-yellow-900 text-yellow-300'
-                : state?.running
+          <div className="flex items-center gap-2">
+            <span
+              className={`text-xs px-2 py-1 rounded-full ${
+                wsStatus === 'connected'
                   ? 'bg-green-900 text-green-300'
-                  : 'bg-red-900 text-red-300'
-            }`}
-          >
-            {state?.paperMode ? 'PAPER MODE' : state?.running ? 'LIVE' : 'PAUSED'}
-          </span>
+                  : wsStatus === 'connecting'
+                    ? 'bg-yellow-900 text-yellow-300'
+                    : 'bg-red-900 text-red-300'
+              }`}
+            >
+              {wsStatus === 'connected' ? '🟢 WS' : wsStatus === 'connecting' ? '🔄 WS' : '🔴 WS'}
+            </span>
+            <span
+              className={`text-xs px-3 py-1 rounded-full font-bold ${
+                state?.paperMode
+                  ? 'bg-yellow-900 text-yellow-300'
+                  : state?.running
+                    ? 'bg-green-900 text-green-300'
+                    : 'bg-red-900 text-red-300'
+              }`}
+            >
+              {state?.paperMode ? 'PAPER MODE' : state?.running ? 'LIVE' : 'PAUSED'}
+            </span>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3 mb-6 sm:grid-cols-4">
