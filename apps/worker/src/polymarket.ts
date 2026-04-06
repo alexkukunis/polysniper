@@ -24,13 +24,13 @@ export class PolymarketClient extends EventEmitter {
     this.clob = new ClobClient(
       CLOB_API,
       137,
-      wallet,
+      wallet as any,
       {
         key: process.env.POLY_API_KEY!,
         secret: process.env.POLY_API_SECRET!,
         passphrase: process.env.POLY_PASSPHRASE!,
       }
-    )
+    ) as any
   }
 
   async start() {

@@ -77,11 +77,11 @@ export class Scanner {
       }).filter(Boolean)
 
       // Collect all token IDs from markets
-      const marketTokens = await db.market.findMany({ 
+      const marketTokens = await db.market.findMany({
         where: { active: true },
         select: { upTokenId: true, downTokenId: true }
       })
-      
+
       this.polymarket.updateSubscriptions(
         marketTokens.flatMap(m => [m.upTokenId, m.downTokenId])
       )

@@ -74,3 +74,19 @@ model Market {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
+
+model Config {
+  id              String   @id @default("singleton")
+  polyApiKey      String?
+  polyApiSecret   String?
+  polyPassphrase  String?
+  walletPrivateKey  String?
+  polygonRpc      String?
+  polygonWssRpc   String?
+  telegramBotToken String?
+  telegramChatId  String?
+  bankrollUsdc    Float    @default(1000)
+  paperMode       Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}

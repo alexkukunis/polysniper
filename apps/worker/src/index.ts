@@ -1,3 +1,7 @@
+import { resolve } from 'path'
+import { config } from 'dotenv'
+config({ path: resolve(__dirname, '../../../.env') })
+
 import { ChainlinkListener } from './chainlink'
 import { PolymarketClient } from './polymarket'
 import { StrategyEngine } from './strategy'

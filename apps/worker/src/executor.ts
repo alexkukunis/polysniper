@@ -1,6 +1,7 @@
 import { db } from '@repo/db'
 import { sendAlert } from './alerts'
 import { PolymarketClient } from './polymarket'
+import { Side as ClobSide } from '@polymarket/clob-client'
 
 function todayDate() {
   const d = new Date()
@@ -45,11 +46,10 @@ export class Executor {
         const order = await this.client.clob.createOrder({
           tokenID: p.assetId,
           price: p.entryPrice,
-          side: 'BUY',
-          size: shares.toString(),
-          orderType: 'FOK', // Fill or Kill
-        })
-        orderId = order?.orderID ?? null
+          side: ClobSide.BUY,
+          size: shares,
+        } as any)
+        orderId = String(order?.orderID ?? null)
       } catch (err: any) {
         console.error('Order placement failed:', err.message)
         await sendAlert(`⚠️ Order failed: ${err.message}`)
