@@ -1,5 +1,5 @@
 {
-  "name": "polysniper",
+  "name": "kalshi-sniper",
   "private": true,
   "scripts": {
     "build": "turbo build",

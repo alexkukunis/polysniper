@@ -216,7 +216,7 @@ export default function Dashboard() {
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div>
-              <h1 className="text-xl font-semibold tracking-tight text-white">PolySniper</h1>
+              <h1 className="text-xl font-semibold tracking-tight text-white">KalshiSniper</h1>
               <p className="text-xs text-gray-500 mt-0.5">Parity Arbitrage Bot</p>
             </div>
           </div>

@@ -1,6 +1,6 @@
-# 🎯 PolySniper — YES/NO Parity Arbitrage Bot
+# 🎯 KalshiSniper — YES/NO Parity Arbitrage Bot
 
-A 24/7 autonomous trading bot for Kalshi crypto prediction markets using **YES/NO Parity Arbitrage**.
+A 24/7 autonomous trading bot for Kalshi prediction markets using **YES/NO Parity Arbitrage**.
 
 ## 📐 Core Strategy
 

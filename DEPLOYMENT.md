@@ -51,7 +51,7 @@ Set on both services:
 ## Directory Structure
 
 ```
-polysniper/
+kalshi-sniper/
 ├── apps/
 │   ├── web/          ← Next.js + WebSocket (server.ts)
 │   └── worker/       ← Trading bot (src/index.ts)
