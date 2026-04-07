@@ -11,21 +11,13 @@ const dev = process.env.NODE_ENV !== 'production'
 const app = next({ dev })
 const handle = app.getRequestHandler()
 
-// In production, WORKER_WS_URL env var MUST be set (Railway internal DNS)
+// In production (Railway), services communicate via internal DNS
 // In local dev, defaults to localhost:3002
 const WORKER_WS = process.env.WORKER_WS_URL || (
   process.env.NODE_ENV === 'production'
-    ? null  // Must be explicitly set in production
+    ? 'ws://worker.railway.internal:3002/ws'
     : 'ws://localhost:3002/ws'
 )
-
-if (process.env.NODE_ENV === 'production' && !WORKER_WS) {
-  console.error('❌ ERROR: WORKER_WS_URL environment variable is not set in production.')
-  console.error('   Set it in your Railway web service to your worker service URL, e.g.:')
-  console.error('   ws://<worker-service-name>.railway.internal:3002/ws')
-  console.error('   Or use the full Railway service URL.')
-  process.exit(1)
-}
 
 app.prepare().then(() => {
   const server = createServer((req, res) => {
