@@ -1,11 +1,12 @@
-# Railway Configuration (Web Service)
-# For Worker service, create a separate service in Railway dashboard
+# Railway Configuration
+# Service detection via RAILWAY_SERVICE_NAME (auto-set by Railway)
+#   - worker service → @repo/worker (no HTTP healthcheck)
+#   - web service → @repo/web (healthcheck on /)
 
 [build]
 builder = "RAILPACK"
 
 [deploy]
-startCommand = "pnpm --filter @repo/web start"
-healthcheckPath = "/"
+startCommand = "bash start.sh"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
