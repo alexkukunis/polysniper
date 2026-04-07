@@ -86,6 +86,26 @@ export default function Dashboard() {
   const [connected, setConnected] = useState(false)
   const [showExitInfo, setShowExitInfo] = useState(false)
   const [auditFilter, setAuditFilter] = useState<'all' | 'filled' | 'skipped' | 'exits' | 'errors'>('all')
+  const [pingResult, setPingResult] = useState<{
+    success: boolean
+    target: string
+    method: string
+    summary: {
+      avgLatency: number | null
+      minLatency: number | null
+      maxLatency: number | null
+      jitter: number | null
+      successful: number
+      failed: number
+      total: number
+      threshold: number
+      verdict: 'institutional' | 'good' | 'slow' | 'unreachable'
+    }
+    individualResults: string[]
+    errors: string[]
+  } | null>(null)
+  const [pingRunning, setPingRunning] = useState(false)
+  const [showPingModal, setShowPingModal] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
 
   // Use refs for high-frequency updates
@@ -107,6 +127,28 @@ export default function Dashboard() {
     if (now - lastRenderRef.current < 100) return
     lastRenderRef.current = now
     forceRender(n => n + 1)
+  }, [])
+
+  // Ping test
+  const runPingTest = useCallback(async () => {
+    setPingRunning(true)
+    setShowPingModal(true)
+    try {
+      const res = await fetch('/api/ping')
+      const data = await res.json()
+      setPingResult(data)
+    } catch (err: any) {
+      setPingResult({
+        success: false,
+        target: 'trading-api.kalshi.com',
+        method: 'TCP/HTTP connection latency',
+        summary: { avgLatency: null, minLatency: null, maxLatency: null, jitter: null, successful: 0, failed: 5, total: 5, threshold: 10, verdict: 'unreachable' },
+        individualResults: [],
+        errors: [err.message],
+      })
+    } finally {
+      setPingRunning(false)
+    }
   }, [])
 
   // Connect to WebSocket
@@ -298,6 +340,12 @@ export default function Dashboard() {
             <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full ${botState.dryRun ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
               {botState.dryRun ? 'DRY RUN' : 'LIVE'}
             </span>
+            <button
+              onClick={runPingTest}
+              className="px-3 py-1 text-xs font-medium text-purple-400 hover:text-purple-300 border border-purple-500/20 hover:border-purple-500/40 rounded-lg transition-all"
+            >
+              ⚡ Network Test
+            </button>
             <Link href="/settings" className="px-3 py-1 text-xs text-gray-400 hover:text-white border border-white/10 rounded-lg transition-colors">
               Settings
             </Link>
@@ -715,6 +763,140 @@ export default function Dashboard() {
           </p>
         </div>
       </div>
+
+      {/* Ping Test Modal */}
+      {showPingModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setShowPingModal(false)}>
+          <div className="w-full max-w-2xl bg-[#1a1a1a] border border-white/10 rounded-2xl shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+              <div>
+                <h2 className="text-base font-semibold text-white">⚡ Network Latency Test</h2>
+                <p className="text-xs text-gray-500 mt-0.5">Your server → trading-api.kalshi.com</p>
+              </div>
+              <button onClick={() => setShowPingModal(false)} className="text-gray-500 hover:text-white transition-colors">
+                ✕
+              </button>
+            </div>
+
+            <div className="px-6 py-5">
+              {pingRunning ? (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <div className="w-8 h-8 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                  <p className="text-sm text-gray-400 mt-4">Running ping test...</p>
+                  <p className="text-xs text-gray-600 mt-1">This takes ~15 seconds</p>
+                </div>
+              ) : pingResult ? (
+                <div className="space-y-5">
+                  {/* Verdict Banner */}
+                  {pingResult.summary.verdict === 'institutional' && (
+                    <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-center">
+                      <div className="text-2xl mb-1">🏆</div>
+                      <div className="text-lg font-semibold text-emerald-400">INSTITUTIONAL-GRADE SETUP</div>
+                      <p className="text-xs text-emerald-400/70 mt-1">Avg latency under 10ms. Elite network. You're competing at the highest level.</p>
+                    </div>
+                  )}
+                  {pingResult.summary.verdict === 'good' && (
+                    <div className="p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl text-center">
+                      <div className="text-2xl mb-1">✅</div>
+                      <div className="text-lg font-semibold text-blue-400">GOOD — UNDER 30ms</div>
+                      <p className="text-xs text-blue-400/70 mt-1">Solid connection. Focus on trade edge quality.</p>
+                    </div>
+                  )}
+                  {pingResult.summary.verdict === 'slow' && (
+                    <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-center">
+                      <div className="text-2xl mb-1">⚠️</div>
+                      <div className="text-lg font-semibold text-amber-400">ABOVE 30ms</div>
+                      <p className="text-xs text-amber-400/70 mt-1">Latency disadvantage. Only trade high-conviction signals.</p>
+                    </div>
+                  )}
+                  {pingResult.summary.verdict === 'unreachable' && (
+                    <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-center">
+                      <div className="text-2xl mb-1">❌</div>
+                      <div className="text-lg font-semibold text-red-400">UNREACHABLE</div>
+                      <p className="text-xs text-red-400/70 mt-1">Cannot connect to Kalshi API. Check network/config.</p>
+                    </div>
+                  )}
+
+                  {/* Stats Grid */}
+                  <div className="grid grid-cols-4 gap-3">
+                    <div className="bg-white/[0.03] border border-white/5 rounded-lg p-3 text-center">
+                      <div className="text-[10px] uppercase tracking-wider text-gray-600 mb-1">Avg</div>
+                      <div className={`text-2xl font-mono font-bold ${
+                        pingResult.summary.avgLatency !== null && pingResult.summary.avgLatency < 10
+                          ? 'text-emerald-400'
+                          : pingResult.summary.avgLatency !== null && pingResult.summary.avgLatency < 30
+                          ? 'text-blue-400'
+                          : pingResult.summary.avgLatency !== null
+                          ? 'text-amber-400'
+                          : 'text-gray-500'
+                      }`}>
+                        {pingResult.summary.avgLatency !== null ? `${pingResult.summary.avgLatency}ms` : '--'}
+                      </div>
+                    </div>
+                    <div className="bg-white/[0.03] border border-white/5 rounded-lg p-3 text-center">
+                      <div className="text-[10px] uppercase tracking-wider text-gray-600 mb-1">Min</div>
+                      <div className="text-2xl font-mono font-bold text-emerald-400">
+                        {pingResult.summary.minLatency !== null ? `${pingResult.summary.minLatency}ms` : '--'}
+                      </div>
+                    </div>
+                    <div className="bg-white/[0.03] border border-white/5 rounded-lg p-3 text-center">
+                      <div className="text-[10px] uppercase tracking-wider text-gray-600 mb-1">Max</div>
+                      <div className="text-2xl font-mono font-bold text-red-400">
+                        {pingResult.summary.maxLatency !== null ? `${pingResult.summary.maxLatency}ms` : '--'}
+                      </div>
+                    </div>
+                    <div className="bg-white/[0.03] border border-white/5 rounded-lg p-3 text-center">
+                      <div className="text-[10px] uppercase tracking-wider text-gray-600 mb-1">Jitter</div>
+                      <div className="text-2xl font-mono font-bold text-white">
+                        {pingResult.summary.jitter !== null ? `${pingResult.summary.jitter}ms` : '--'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* HFT Context */}
+                  <div className="p-3 bg-purple-500/5 border border-purple-500/10 rounded-lg">
+                    <h3 className="text-xs font-medium text-purple-400 mb-2">Why This Matters for HFT</h3>
+                    <ul className="text-[11px] text-gray-400 space-y-1.5">
+                      <li>• <strong className="text-gray-300">&lt;10ms</strong> — Institutional tier. You can compete on pure speed.</li>
+                      <li>• <strong className="text-gray-300">10-30ms</strong> — Good, but speed arbitrage is limited. Focus on edge quality.</li>
+                      <li>• <strong className="text-gray-300">&gt;30ms</strong> — Latency disadvantage. Only trade high-conviction signals.</li>
+                      <li>• <strong className="text-gray-300">Jitter</strong> — Variability between requests. Lower = more consistent execution.</li>
+                      <li>• This tests real TCP/TLS connection time to Kalshi's API — what your bot actually uses.</li>
+                    </ul>
+                  </div>
+
+                  {/* Individual Results */}
+                  {pingResult.individualResults.length > 0 && (
+                    <div>
+                      <h3 className="text-xs font-medium text-gray-500 mb-2">Individual Results</h3>
+                      <div className="bg-black/30 border border-white/5 rounded-lg p-3 space-y-1">
+                        {pingResult.individualResults.map((r, i) => (
+                          <div key={i} className="text-[11px] font-mono text-gray-400">{r}</div>
+                        ))}
+                        {pingResult.errors.map((e, i) => (
+                          <div key={`err-${i}`} className="text-[11px] font-mono text-red-400">{e}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Retest Button */}
+                  <button
+                    onClick={runPingTest}
+                    disabled={pingRunning}
+                    className="btn btn-secondary w-full disabled:opacity-50"
+                  >
+                    {pingRunning ? 'Running...' : '🔄 Re-run Test'}
+                  </button>
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-600 text-sm">No results available</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   )
 }
