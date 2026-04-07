@@ -8,6 +8,7 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import * as crypto from 'crypto'
 import * as http from 'http'
+import * as url from 'url'
 
 const DEMO_WS = 'wss://demo-api.kalshi.co/trade-api/ws/v2'
 const PROD_WS = 'wss://api.elections.kalshi.com/trade-api/ws/v2'
@@ -31,6 +32,17 @@ export interface MarketMeta {
   event_ticker: string
   close_time: string
   category: string
+}
+
+export interface BotStateSnapshot {
+  auditLog: any[]
+  recentTrades: any[]
+  pnlSnapshot: any
+  botState: any
+}
+
+export interface DataProvider {
+  getSnapshot(): BotStateSnapshot
 }
 
 interface KalshiWSConfig {
@@ -66,10 +78,16 @@ export class WebSocketBridge {
   private readonly HEARTBEAT_INTERVAL_MS = 15000  // Ping every 15s
   private readonly STALE_CONNECTION_MS = 45000    // Reconnect if no data for 45s
 
+  // ── HTTP API Data Provider ──
+  private dataProvider: DataProvider | null = null
+
   constructor(port: number, path: string, cfg: KalshiWSConfig) {
     this.port = port
     this.cfg = cfg
-    this.server = http.createServer()
+    this.server = http.createServer((req, res) => {
+      // Handle HTTP API requests alongside WebSocket
+      this.handleHttpRequest(req, res)
+    })
     this.wss = new WebSocketServer({ 
       server: this.server, 
       path,
@@ -139,8 +157,91 @@ export class WebSocketBridge {
     this.marketMeta.set(meta.ticker, meta)
   }
 
+  registerDataProvider(provider: DataProvider) {
+    this.dataProvider = provider
+  }
+
+  // ── HTTP API Request Handler ──
+
+  handleHttpRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const parsed = url.parse(req.url!, true)
+    const pathname = parsed.pathname
+
+    // CORS headers for all responses
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204)
+      res.end()
+      return
+    }
+
+    if (req.method !== 'GET') {
+      res.writeHead(405, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Method not allowed' }))
+      return
+    }
+
+    // ── /api/audit — Fetch audit log ──
+    if (pathname === '/api/audit') {
+      if (!this.dataProvider) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Data provider not registered' }))
+        return
+      }
+      const snapshot = this.dataProvider.getSnapshot()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ auditLog: snapshot.auditLog }))
+      return
+    }
+
+    // ── /api/trades — Fetch recent trades ──
+    if (pathname === '/api/trades') {
+      if (!this.dataProvider) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Data provider not registered' }))
+        return
+      }
+      const snapshot = this.dataProvider.getSnapshot()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ trades: snapshot.recentTrades }))
+      return
+    }
+
+    // ── /api/pnl — Fetch P&L snapshot ──
+    if (pathname === '/api/pnl') {
+      if (!this.dataProvider) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Data provider not registered' }))
+        return
+      }
+      const snapshot = this.dataProvider.getSnapshot()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ pnl: snapshot.pnlSnapshot }))
+      return
+    }
+
+    // ── /api/state — Fetch full bot state ──
+    if (pathname === '/api/state') {
+      if (!this.dataProvider) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Data provider not registered' }))
+        return
+      }
+      const snapshot = this.dataProvider.getSnapshot()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(snapshot.botState))
+      return
+    }
+
+    // ── Unknown route ──
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'Not found' }))
+  }
+
   subscribeOrderbook(ticker: string) {
-    // Subscribe to orderbook_delta for a specific market
     // Kalshi requires channels INSIDE params, plus market_ticker
     const payload = {
       id: 2,

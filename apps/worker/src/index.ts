@@ -3,7 +3,7 @@ import { loadEnv, getKalshiPrivateKey, validateKalshiCredentials } from './env'
 // Load environment variables (local .env file or Railway-injected)
 loadEnv()
 
-import { WebSocketBridge } from './ws-bridge'
+import { WebSocketBridge, DataProvider } from './ws-bridge'
 import { LatencySniper } from './simple-bot'
 import { BinanceOracle } from './coinbase'
 import { KalshiAPI } from './kalshi-api'
@@ -162,6 +162,10 @@ async function main() {
     stopLossBtcUsd,
     takeProfitCents,
   }, bridge)
+
+  // Register sniper as data provider for HTTP API
+  bridge.registerDataProvider(sniper)
+  console.log('✅ HTTP API registered (audit, trades, pnl, state)')
 
   // Wire event-driven callback
   oracle.setSpikeCallback((event) => sniper!.onSpike(event))

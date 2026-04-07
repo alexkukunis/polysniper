@@ -16,7 +16,7 @@
  */
 
 import { KalshiAPI } from './kalshi-api'
-import { WebSocketBridge } from './ws-bridge'
+import { WebSocketBridge, DataProvider, BotStateSnapshot } from './ws-bridge'
 import { BinanceOracle, PriceEvent } from './coinbase'
 
 // Kalshi fee: disabled for loose testing mode
@@ -124,7 +124,7 @@ interface SniperConfig {
   takeProfitCents?: number      // Exit when position reaches this profit (default: 10¢)
 }
 
-export class LatencySniper {
+export class LatencySniper implements DataProvider {
   private api: KalshiAPI
   private bridge: WebSocketBridge
   private cfg: SniperConfig
@@ -439,6 +439,68 @@ export class LatencySniper {
    */
   getRecentTrades(limit = 20): TradeRecord[] {
     return [...this.trades].reverse().slice(0, limit)
+  }
+
+  /**
+   * Get full state snapshot for HTTP API polling.
+   * Combines audit log, recent trades, P&L, and current bot state.
+   */
+  getSnapshot(): BotStateSnapshot {
+    const pnl = this.getPnLSnapshot()
+    const momentum = this.cfg.oracle.getMomentumContext()
+
+    return {
+      auditLog: this.getAuditLog(),
+      recentTrades: this.getRecentTrades(50),
+      pnlSnapshot: pnl,
+      botState: {
+        running: this.running,
+        ordersPlaced: this.ordersPlaced,
+        fillsReceived: this.fillsReceived,
+        inventoryYes: this.inventoryYes,
+        inventoryNo: this.inventoryNo,
+        isDemo: this.cfg.demo,
+        dryRun: this.cfg.dryRun,
+        orderbookReady: this.bridge.isOrderbookReady(),
+        yesBid: this.bridge.getYesBidCents(),
+        yesAsk: this.bridge.getYesAskCents(),
+        btcPrice: this.cfg.oracle.getCurrentPrice(),
+        strikePrice: this.cfg.strikePrice,
+        time: new Date().toISOString(),
+        realizedPnLCents: pnl.realizedPnLCents,
+        unrealizedPnLCents: pnl.unrealizedPnLCents,
+        totalPnLCents: pnl.totalPnLCents,
+        winRate: pnl.winRate,
+        totalTrades: pnl.totalTrades,
+        avgLatencyMs: pnl.avgLatencyMs,
+        bestTradeCents: pnl.bestTradeCents,
+        worstTradeCents: pnl.worstTradeCents,
+        totalFeesPaidCents: pnl.totalFeesPaidCents,
+        exitOrdersPlaced: this.exitOrdersPlaced,
+        stopLossesTriggered: this.stopLossesTriggered,
+        takeProfitsTriggered: this.takeProfitsTriggered,
+        timeExitsTriggered: this.timeExitsTriggered,
+        maxHoldSeconds: this.maxHoldMs / 1000,
+        stopLossBtcUsd: this.stopLossBtcUsd,
+        takeProfitCents: this.takeProfitCents,
+        openPositions: this.trades.filter(t => t.status === 'open').map(t => ({
+          id: t.id,
+          side: t.side,
+          action: t.action,
+          entryPriceCents: t.entryPriceCents,
+          count: t.count,
+          btcPriceAtEntry: t.btcPriceAtEntry,
+          ageSeconds: Math.round((Date.now() - new Date(t.entryTime).getTime()) / 1000),
+          estimatedPnLCents: t.side === 'yes'
+            ? (this.bridge.getYesBidCents() ?? 0) - t.entryPriceCents
+            : (100 - (this.bridge.getYesAskCents() ?? 100)) - t.entryPriceCents,
+        })),
+        btcChange2s: momentum.change2s,
+        btcChange5s: momentum.change5s,
+        btcChange30s: momentum.change30s,
+        btcPriceHistory: this.cfg.oracle.getRecentPriceHistory(60),
+      },
+    }
   }
 
   /**

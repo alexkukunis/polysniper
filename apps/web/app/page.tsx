@@ -248,6 +248,20 @@ export default function Dashboard() {
     }
   }, [throttledUpdate])
 
+  // ── Fetch audit log on mount (survives page refresh) ──
+  useEffect(() => {
+    fetch('/api/worker/audit')
+      .then(res => res.json())
+      .then(data => {
+        if (data.auditLog && Array.isArray(data.auditLog)) {
+          setAuditLog(data.auditLog.reverse()) // Show newest first
+        }
+      })
+      .catch(() => {
+        // Worker might not be running yet — silently ignore
+      })
+  }, [])
+
   // ── Formatters ──
 
   function formatTime(iso: string) {
