@@ -15,9 +15,23 @@ const handle = app.getRequestHandler()
 // In local dev, defaults to localhost:3002
 const WORKER_WS = process.env.WORKER_WS_URL || (
   process.env.NODE_ENV === 'production'
-    ? 'ws://worker.railway.internal:3002/ws'
+    ? null  // Railway internal DNS varies — must be set explicitly
     : 'ws://localhost:3002/ws'
 )
+
+if (process.env.NODE_ENV === 'production' && !WORKER_WS) {
+  console.error('\n❌ Cannot connect to worker: WORKER_WS_URL is not set')
+  console.error('   Fix: Add this env var to your web service in Railway:')
+  console.error('   WORKER_WS_URL=ws://<your-worker-service-name>.railway.internal:3002/ws')
+  console.error('')
+  console.error('   Hint: Railway auto-injects env vars for linked services.')
+  console.error('   Available Railway env vars:')
+  Object.keys(process.env)
+    .filter(k => k.includes('RAILWAY') || k.includes('WORKER') || k.includes('INTERNAL'))
+    .forEach(k => console.error(`     ${k}=${process.env[k]}`))
+  console.error('')
+  process.exit(1)
+}
 
 app.prepare().then(() => {
   const server = createServer((req, res) => {
