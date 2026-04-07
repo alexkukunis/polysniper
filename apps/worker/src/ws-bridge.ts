@@ -49,6 +49,7 @@ export class WebSocketBridge {
   private running = false
   private reconnectTimer: NodeJS.Timeout | null = null
   private marketMeta = new Map<string, MarketMeta>()
+  private port: number
 
   // Local orderbook for the sniper's target market
   private orderbook: OrderbookState | null = null
@@ -59,6 +60,7 @@ export class WebSocketBridge {
   private pendingMessages: any[] = []
 
   constructor(port: number, path: string, cfg: KalshiWSConfig) {
+    this.port = port
     this.cfg = cfg
     this.server = http.createServer()
     this.wss = new WebSocketServer({ server: this.server, path })
