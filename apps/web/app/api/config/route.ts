@@ -1,137 +1,59 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@repo/db'
+import { readFile, writeFile } from 'fs/promises'
+import { resolve } from 'path'
 
-export async function GET() {
+const ENV_PATH = resolve(process.cwd(), '../../.env')
+
+async function readEnv() {
   try {
-    let config = await db.config.findUnique({
-      where: { id: 'singleton' },
+    const content = await readFile(ENV_PATH, 'utf-8')
+    const env: Record<string, string> = {}
+    content.split('\n').forEach(line => {
+      const [key, ...rest] = line.split('=')
+      if (key && rest.length) env[key.trim()] = rest.join('=').trim()
     })
-
-    if (!config) {
-      config = await db.config.create({
-        data: { id: 'singleton' },
-      })
-    }
-
-    return NextResponse.json(config)
-  } catch (error: any) {
-    console.error('Error fetching config:', error)
-
-    // Return default config if database is not ready
-    if (error?.code === 'P2021' || error?.message?.includes('does not exist')) {
-      return NextResponse.json({
-        id: 'singleton',
-        kalshiAccessKey: null,
-        kalshiPrivateKey: null,
-        kalshiApiUrl: null,
-        kalshiWsUrl: null,
-        kalshiDemo: true,
-        botMode: 'hybrid',
-        telegramBotToken: null,
-        telegramChatId: null,
-        bankrollUsdc: 1000,
-        paperMode: true,
-        // Market Maker params
-        mmMinVolume24h: 15000,
-        mmMaxSpread: 4,
-        mmBaseSpreadCents: 2,
-        mmOrderSize: 20,
-        mmMaxMarkets: 3,
-        // Legacy Parity params
-        minProfitCents: 1.5,
-        scanIntervalMs: 500,
-        marketDiscoveryIntervalMs: 120000,
-        maxConcurrentTrades: 5,
-        maxPositionPct: 5,
-        dailyLossPct: 3,
-        minTradeSizeUsd: 10,
-      })
-    }
-
-    return NextResponse.json(
-      { error: 'Failed to fetch config' },
-      { status: 500 }
-    )
+    return env
+  } catch {
+    return {}
   }
 }
 
-export async function POST(request: NextRequest) {
+async function writeEnv(env: Record<string, string>) {
+  const content = Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n')
+  await writeFile(ENV_PATH, content)
+}
+
+export async function GET() {
+  const env = await readEnv()
+  return NextResponse.json({
+    apiKey: env.KALSHI_ACCESS_KEY || '',
+    privateKey: env.KALSHI_PRIVATE_KEY || '',
+    demo: env.KALSHI_DEMO !== 'false',
+    dryRun: env.DRY_RUN !== 'false',
+    btcTicker: env.KALSHI_BTC_TICKER || '',
+    spikeThreshold: parseInt(env.SPIKE_THRESHOLD || '25'),
+    spikeWindowMs: parseInt(env.SPIKE_WINDOW_MS || '2000'),
+    minEdgeCents: parseInt(env.MIN_EDGE_CENTS || '2'),
+  })
+}
+
+export async function POST(req: NextRequest) {
   try {
-    const body = await request.json()
+    const body = await req.json()
+    const env = await readEnv()
 
-    const config = await db.config.upsert({
-      where: { id: 'singleton' },
-      update: {
-        kalshiAccessKey: body.kalshiAccessKey || null,
-        kalshiPrivateKey: body.kalshiPrivateKey || null,
-        kalshiApiUrl: body.kalshiApiUrl || null,
-        kalshiWsUrl: body.kalshiWsUrl || null,
-        kalshiDemo: body.kalshiDemo ?? true,
-        botMode: body.botMode || 'hybrid',
-        telegramBotToken: body.telegramBotToken || null,
-        telegramChatId: body.telegramChatId || null,
-        bankrollUsdc: body.bankrollUsdc ?? 1000,
-        paperMode: body.paperMode ?? true,
-        // Market Maker params
-        mmMinVolume24h: body.mmMinVolume24h ?? 15000,
-        mmMaxSpread: body.mmMaxSpread ?? 4,
-        mmBaseSpreadCents: body.mmBaseSpreadCents ?? 2,
-        mmOrderSize: body.mmOrderSize ?? 20,
-        mmMaxMarkets: body.mmMaxMarkets ?? 3,
-        // Legacy Parity params
-        minProfitCents: body.minProfitCents ?? 1.5,
-        scanIntervalMs: body.scanIntervalMs ?? 500,
-        marketDiscoveryIntervalMs: body.marketDiscoveryIntervalMs ?? 120000,
-        maxConcurrentTrades: body.maxConcurrentTrades ?? 5,
-        maxPositionPct: body.maxPositionPct ?? 5,
-        dailyLossPct: body.dailyLossPct ?? 3,
-        minTradeSizeUsd: body.minTradeSizeUsd ?? 10,
-      },
-      create: {
-        id: 'singleton',
-        kalshiAccessKey: body.kalshiAccessKey || null,
-        kalshiPrivateKey: body.kalshiPrivateKey || null,
-        kalshiApiUrl: body.kalshiApiUrl || null,
-        kalshiWsUrl: body.kalshiWsUrl || null,
-        kalshiDemo: body.kalshiDemo ?? true,
-        botMode: body.botMode || 'hybrid',
-        telegramBotToken: body.telegramBotToken || null,
-        telegramChatId: body.telegramChatId || null,
-        bankrollUsdc: body.bankrollUsdc ?? 1000,
-        paperMode: body.paperMode ?? true,
-        // Market Maker params
-        mmMinVolume24h: body.mmMinVolume24h ?? 15000,
-        mmMaxSpread: body.mmMaxSpread ?? 4,
-        mmBaseSpreadCents: body.mmBaseSpreadCents ?? 2,
-        mmOrderSize: body.mmOrderSize ?? 20,
-        mmMaxMarkets: body.mmMaxMarkets ?? 3,
-        // Legacy Parity params
-        minProfitCents: body.minProfitCents ?? 1.5,
-        scanIntervalMs: body.scanIntervalMs ?? 500,
-        marketDiscoveryIntervalMs: body.marketDiscoveryIntervalMs ?? 120000,
-        maxConcurrentTrades: body.maxConcurrentTrades ?? 5,
-        maxPositionPct: body.maxPositionPct ?? 5,
-        dailyLossPct: body.dailyLossPct ?? 3,
-        minTradeSizeUsd: body.minTradeSizeUsd ?? 10,
-      },
-    })
+    if (body.apiKey) env.KALSHI_ACCESS_KEY = body.apiKey
+    if (body.privateKey) env.KALSHI_PRIVATE_KEY = body.privateKey
+    env.KALSHI_DEMO = body.demo !== false ? 'true' : 'false'
+    env.DRY_RUN = body.dryRun !== false ? 'true' : 'false'
+    if (body.btcTicker) env.KALSHI_BTC_TICKER = body.btcTicker
+    if (body.spikeThreshold) env.SPIKE_THRESHOLD = String(body.spikeThreshold)
+    if (body.spikeWindowMs) env.SPIKE_WINDOW_MS = String(body.spikeWindowMs)
+    if (body.minEdgeCents) env.MIN_EDGE_CENTS = String(body.minEdgeCents)
 
-    return NextResponse.json(config)
-  } catch (error: any) {
-    console.error('Error saving config:', error)
-
-    // Return success if database is not ready
-    if (error?.code === 'P2021' || error?.message?.includes('does not exist')) {
-      const body = await request.json()
-      return NextResponse.json({
-        id: 'singleton',
-        ...body,
-      })
-    }
-
-    return NextResponse.json(
-      { error: 'Failed to save config' },
-      { status: 500 }
-    )
+    await writeEnv(env)
+    return NextResponse.json({ success: true })
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 })
   }
 }

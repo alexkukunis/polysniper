@@ -19,7 +19,7 @@ You need **2 services** in Railway. Both connect to the same GitHub repo.
 | Setting | Value |
 |---------|-------|
 | **Builder** | `RAILPACK` |
-| **Build Command** | `pnpm install --frozen-lockfile && pnpm --filter @repo/db db:generate && pnpm --filter @repo/web build` |
+| **Build Command** | `pnpm install --frozen-lockfile && pnpm --filter @repo/web build` |
 | **Start Command** | `pnpm --filter @repo/web start` |
 | **Healthcheck Path** | `/` |
 
@@ -30,7 +30,7 @@ The custom `server.ts` runs Next.js and a WebSocket server (`/ws`) on the same p
 | Setting | Value |
 |---------|-------|
 | **Builder** | `RAILPACK` |
-| **Build Command** | `pnpm install --frozen-lockfile && pnpm --filter @repo/db db:generate` |
+| **Build Command** | `pnpm install --frozen-lockfile` |
 | **Start Command** | `pnpm --filter @repo/worker start` |
 | **Healthcheck Path** | `/` |
 

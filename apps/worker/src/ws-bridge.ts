@@ -159,6 +159,43 @@ export class WebSocketBridge {
     return Math.round(Math.max(...prices) * 100)
   }
 
+  /**
+   * Get the available contract count at a specific YES bid price level.
+   * Returns null if price level doesn't exist.
+   */
+  getYesBidSizeAtPrice(priceCents: number): number | null {
+    if (!this.orderbook) return null
+    const priceDollars = (priceCents / 100).toFixed(4)
+    const count = this.orderbook.yesBook.get(priceDollars)
+    if (!count) return null
+    return parseFloat(count)
+  }
+
+  /**
+   * Get the available contract count at the best YES bid level.
+   */
+  getYesBidBestSize(): number | null {
+    if (!this.orderbook || this.orderbook.yesBook.size === 0) return null
+    const prices = Array.from(this.orderbook.yesBook.keys()).map(Number)
+    const bestPrice = Math.max(...prices)
+    const count = this.orderbook.yesBook.get(bestPrice.toFixed(4))
+    if (!count) return null
+    return parseFloat(count)
+  }
+
+  /**
+   * Get the available contract count at the best YES ask level.
+   * YES ask is derived from NO book: ask = 1.00 - max(NO bid)
+   */
+  getYesAskBestSize(): number | null {
+    if (!this.orderbook || this.orderbook.noBook.size === 0) return null
+    const noPrices = Array.from(this.orderbook.noBook.keys()).map(Number)
+    const highestNoBid = Math.max(...noPrices)
+    const count = this.orderbook.noBook.get(highestNoBid.toFixed(4))
+    if (!count) return null
+    return parseFloat(count)
+  }
+
   // ── Internal: Kalshi WS connection ──
 
   private connectKalshi() {
@@ -180,14 +217,12 @@ export class WebSocketBridge {
       this.running = true
       // Subscribe to public channels first
       this.subscribe()
-      // Wait a bit before subscribing to orderbook_delta to avoid race conditions
-      setTimeout(() => {
-        if (this.pendingOrderbookSubscription) {
-          this.send(this.pendingOrderbookSubscription)
-          console.log(`📖 Subscribed to orderbook_delta for ${this.pendingOrderbookSubscription.params?.market_ticker}`)
-          this.pendingOrderbookSubscription = null
-        }
-      }, 500)
+      // Subscribe to orderbook_delta immediately — no artificial delay
+      if (this.pendingOrderbookSubscription) {
+        this.send(this.pendingOrderbookSubscription)
+        console.log(`📖 Subscribed to orderbook_delta for ${this.pendingOrderbookSubscription.params?.market_ticker}`)
+        this.pendingOrderbookSubscription = null
+      }
     })
 
     this.kalshiWs.on('message', (data: Buffer) => {

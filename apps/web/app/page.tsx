@@ -1,546 +1,699 @@
 'use client'
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import Link from 'next/link'
 
+interface SnipeAuditEntry {
+  time: string
+  btcPrice: number
+  trigger: string
+  action: string
+  status: 'filled' | 'canceled' | 'dry_run' | 'error'
+  orderId?: string
+  edge: number
+  skipReason?: string
+  latencyMs?: number
+  momentumContext?: { change2s: number | null; change5s: number | null; change30s: number | null }
+  edgeExplanation?: string
+  yesAskAtDecision: number
+  yesBidAtDecision: number
+  dynamicMinEdge: number
+  depthCheck?: string
+}
+
+interface OpenPosition {
+  id: string
+  side: 'yes' | 'no'
+  action: 'buy' | 'sell'
+  entryPriceCents: number
+  count: number
+  btcPriceAtEntry: number
+  ageSeconds: number
+  estimatedPnLCents: number
+}
+
+interface BotState {
+  running: boolean
+  ordersPlaced: number
+  fillsReceived: number
+  inventoryYes: number
+  inventoryNo: number
+  isDemo: boolean
+  dryRun: boolean
+  orderbookReady: boolean
+  yesBid: number | null
+  yesAsk: number | null
+  btcPrice: number
+  strikePrice: number
+  // P&L
+  realizedPnLCents: number
+  unrealizedPnLCents: number
+  totalPnLCents: number
+  winRate: number
+  totalTrades: number
+  avgLatencyMs: number
+  bestTradeCents: number
+  worstTradeCents: number
+  // Exit strategy
+  exitOrdersPlaced: number
+  stopLossesTriggered: number
+  takeProfitsTriggered: number
+  timeExitsTriggered: number
+  maxHoldSeconds: number
+  stopLossBtcUsd: number
+  takeProfitCents: number
+  openPositions: OpenPosition[]
+  // Momentum
+  btcChange2s: number | null
+  btcChange5s: number | null
+  btcChange30s: number | null
+  btcPriceHistory: { price: number; timestamp: number }[]
+}
+
 export default function Dashboard() {
-  const [d, setD] = useState<any>(null)
-  const [wsStatus, setWsStatus] = useState<'connected' | 'disconnected' | 'connecting'>('connecting')
-  const [botAction, setBotAction] = useState<'idle' | 'starting' | 'stopping' | 'pausing' | 'resuming'>('idle')
-  const [botMessage, setBotMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
-  const [activeTab, setActiveTab] = useState<'trades' | 'opportunities'>('trades')
+  const [botState, setBotState] = useState<BotState>({
+    running: false, ordersPlaced: 0, fillsReceived: 0,
+    inventoryYes: 0, inventoryNo: 0, isDemo: true, dryRun: true,
+    orderbookReady: false, yesBid: null, yesAsk: null, btcPrice: 0, strikePrice: 0,
+    realizedPnLCents: 0, unrealizedPnLCents: 0, totalPnLCents: 0,
+    winRate: 0, totalTrades: 0, avgLatencyMs: 0, bestTradeCents: 0, worstTradeCents: 0,
+    exitOrdersPlaced: 0, stopLossesTriggered: 0, takeProfitsTriggered: 0, timeExitsTriggered: 0,
+    maxHoldSeconds: 30, stopLossBtcUsd: 30, takeProfitCents: 10,
+    openPositions: [],
+    btcChange2s: null, btcChange5s: null, btcChange30s: null,
+    btcPriceHistory: [],
+  })
+  const [auditLog, setAuditLog] = useState<SnipeAuditEntry[]>([])
+  const [connected, setConnected] = useState(false)
+  const [showExitInfo, setShowExitInfo] = useState(false)
+  const [auditFilter, setAuditFilter] = useState<'all' | 'filled' | 'skipped' | 'exits' | 'errors'>('all')
   const wsRef = useRef<WebSocket | null>(null)
 
+  // Use refs for high-frequency updates
+  const btcPriceRef = useRef<number>(0)
+  const yesBidRef = useRef<number | null>(null)
+  const yesAskRef = useRef<number | null>(null)
+  const [, forceRender] = useState(0)
+
+  // Edge Detection
+  const prevDistanceRef = useRef<number | null>(null)
+  const prevYesAskRef = useRef<number | null>(null)
+  const [edgeFlash, setEdgeFlash] = useState(false)
+  const flashTimerRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Throttle renders (10fps max)
+  const lastRenderRef = useRef(0)
+  const throttledUpdate = useCallback(() => {
+    const now = Date.now()
+    if (now - lastRenderRef.current < 100) return
+    lastRenderRef.current = now
+    forceRender(n => n + 1)
+  }, [])
+
+  // Connect to WebSocket
   useEffect(() => {
     let reconnectTimer: NodeJS.Timeout
-    let ws: WebSocket
 
     function connect() {
-      setWsStatus('connecting')
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const wsUrl = `${protocol}//${window.location.host}/ws`
-      ws = new WebSocket(wsUrl)
+      const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
-      ws.onopen = () => setWsStatus('connected')
+      ws.onopen = () => setConnected(true)
 
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data)
-          
-          // Handle event-driven messages
-          if (msg.type === 'initial_state') {
-            // Initial state from DB on connect
-            setD(msg.data)
-          } else if (msg.type === 'trade') {
-            // Real-time trade event — update trades list
-            setD((prev: any) => {
-              if (!prev) return prev
-              const existingTrades = prev.parityTrades || []
-              const tradeIndex = existingTrades.findIndex((t: any) => t.id === msg.data.id)
-              let newTrades = [...existingTrades]
-              
-              if (tradeIndex >= 0) {
-                newTrades[tradeIndex] = msg.data
-              } else {
-                newTrades = [msg.data, ...existingTrades].slice(0, 50)
-              }
-              
-              return { ...prev, parityTrades: newTrades }
-            })
-          } else if (msg.type === 'opportunity') {
-            // Real-time opportunity event
-            setD((prev: any) => {
-              if (!prev) return prev
-              const existingOpps = prev.parityOpportunities || []
-              const newOpps = [msg.data, ...existingOpps].slice(0, 50)
-              return { ...prev, parityOpportunities: newOpps }
-            })
-          } else if (msg.type === 'state_update') {
-            // Full state refresh from worker
-            setD(msg.data)
-          } else if (msg.type === 'fill') {
-            // Fill event — trigger state refresh
-            setD((prev: any) => prev) // Force re-render
+
+          switch (msg.type) {
+            case 'bot_state':
+              setBotState(prev => {
+                const next = { ...prev, ...msg }
+                if (msg.btcPrice) btcPriceRef.current = msg.btcPrice
+                if (msg.yesBid !== undefined) yesBidRef.current = msg.yesBid
+                if (msg.yesAsk !== undefined) yesAskRef.current = msg.yesAsk
+
+                // Edge detection
+                if (msg.strikePrice && msg.btcPrice && msg.yesAsk !== undefined) {
+                  const distToStrike = msg.strikePrice - msg.btcPrice
+                  const prevDist = prevDistanceRef.current
+                  const prevAsk = prevYesAskRef.current
+
+                  if (prevDist !== null && prevAsk !== null) {
+                    const btcMovedCloser = distToStrike < prevDist
+                    const kalshiDidntMove = msg.yesAsk <= prevAsk
+                    if (btcMovedCloser && kalshiDidntMove) {
+                      setEdgeFlash(true)
+                      if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
+                      flashTimerRef.current = setTimeout(() => setEdgeFlash(false), 1500)
+                    }
+                  }
+                  prevDistanceRef.current = distToStrike
+                  prevYesAskRef.current = msg.yesAsk
+                }
+
+                return next
+              })
+              throttledUpdate()
+              break
+
+            case 'audit':
+              setAuditLog(prev => {
+                const entry: SnipeAuditEntry = {
+                  time: msg.time,
+                  btcPrice: msg.btcPrice,
+                  trigger: msg.trigger,
+                  action: msg.action,
+                  status: msg.status,
+                  orderId: msg.orderId,
+                  edge: msg.edge,
+                  skipReason: msg.skipReason,
+                  latencyMs: msg.latencyMs,
+                  momentumContext: msg.momentumContext,
+                  edgeExplanation: msg.edgeExplanation,
+                  yesAskAtDecision: msg.yesAskAtDecision,
+                  yesBidAtDecision: msg.yesBidAtDecision,
+                  dynamicMinEdge: msg.dynamicMinEdge ?? 0,
+                  depthCheck: msg.depthCheck,
+                }
+                return [entry, ...prev].slice(0, 200)
+              })
+              break
+
+            case 'orderbook':
+              if (msg.yesBid !== undefined) yesBidRef.current = msg.yesBid
+              if (msg.yesAsk !== undefined) yesAskRef.current = msg.yesAsk
+              throttledUpdate()
+              break
+
+            case 'trade_update':
+              // Force re-render for position updates
+              forceRender(n => n + 1)
+              break
           }
         } catch {}
       }
 
-      ws.onclose = () => {
-        setWsStatus('disconnected')
-        reconnectTimer = setTimeout(connect, 3000)
-      }
-
-      ws.onerror = () => setWsStatus('disconnected')
+      ws.onclose = () => { setConnected(false); reconnectTimer = setTimeout(connect, 3000) }
+      ws.onerror = () => setConnected(false)
     }
 
     connect()
-    return () => { clearTimeout(reconnectTimer); ws?.close() }
-  }, [])
-
-  const controlBot = async (action: 'start' | 'stop' | 'pause' | 'resume') => {
-    setBotAction(action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : action === 'pause' ? 'pausing' : 'resuming')
-    setBotMessage(null)
-
-    try {
-      const res = await fetch('/api/bot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action }),
-      })
-
-      const data = await res.json()
-
-      if (data.success) {
-        setBotMessage({ type: 'success', text: data.message })
-      } else {
-        setBotMessage({ type: 'error', text: data.message || data.error })
-      }
-    } catch (err: any) {
-      setBotMessage({ type: 'error', text: 'Failed to control bot' })
-    } finally {
-      setBotAction('idle')
-      setTimeout(() => setBotMessage(null), 3000)
+    return () => {
+      clearTimeout(reconnectTimer)
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
+      if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
     }
+  }, [throttledUpdate])
+
+  // ── Formatters ──
+
+  function formatTime(iso: string) {
+    if (!iso) return '--'
+    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 } as any)
   }
 
-  const state = d?.state
-  const today = d?.today
-  const parityTrades = d?.parityTrades ?? []
-  const parityOpportunities = d?.parityOpportunities ?? []
+  function formatBtc(price: number) {
+    if (!price || price === 0) return '--'
+    return `$${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  }
 
-  // Derived parity-specific metrics
-  const filledTrades = parityTrades.filter((t: any) => t.status === 'FILLED')
-  const partialFills = parityTrades.filter((t: any) => t.status === 'PARTIAL_FILL')
-  const openPositions = parityTrades.filter((t: any) => t.status === 'ORDERED' || t.status === 'TRIGGERED')
-  const totalParityPnl = filledTrades.reduce((sum: number, t: any) => sum + (t.actualProfit ?? 0), 0)
-  const avgCombinedCost = filledTrades.length > 0
-    ? filledTrades.reduce((sum: number, t: any) => sum + (t.combinedCost ?? 0), 0) / filledTrades.length
-    : 0
-  const bestTrade = filledTrades.length > 0
-    ? Math.max(...filledTrades.map((t: any) => t.actualProfit ?? 0))
-    : 0
-  const fillRate = parityTrades.length > 0
-    ? ((filledTrades.length / parityTrades.length) * 100).toFixed(1)
-    : '--'
-  const oppToTradeRatio = parityOpportunities.length > 0
-    ? ((parityTrades.length / parityOpportunities.length) * 100).toFixed(1)
-    : '--'
+  function formatPnl(cents: number) {
+    const dollars = cents / 100
+    const sign = dollars >= 0 ? '+' : ''
+    return `${sign}$${dollars.toFixed(2)}`
+  }
 
-  const stats = [
-    {
-      label: 'Bankroll',
-      value: state?.bankroll != null ? `$${state.bankroll.toFixed(2)}` : '--',
-      change: null as string | null,
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-      ),
-    },
-    {
-      label: 'Daily P&L',
-      value: state?.dailyPnl != null ? `$${state.dailyPnl >= 0 ? '+' : ''}${state.dailyPnl.toFixed(2)}` : '--',
-      change: (state?.dailyPnl ?? 0) >= 0 ? 'positive' : 'negative',
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-        </svg>
-      ),
-    },
-    {
-      label: 'Fill Rate',
-      value: `${fillRate}%`,
-      change: fillRate !== '--' && parseFloat(fillRate as string) >= 50 ? 'positive' : fillRate !== '--' ? 'negative' : null,
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-      ),
-    },
-    {
-      label: 'Markets Scanned',
-      value: state?.marketsScanned != null ? state.marketsScanned.toString() : '--',
-      change: null as string | null,
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-        </svg>
-      ),
-    },
-    {
-      label: 'Open Positions',
-      value: state?.openParityPositions != null ? state.openParityPositions.toString() : openPositions.length.toString(),
-      change: null as string | null,
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-        </svg>
-      ),
-    },
-    {
-      label: 'Opportunities',
-      value: today?.opportunitiesSeen != null ? today.opportunitiesSeen.toString() : parityOpportunities.length.toString(),
-      change: null as string | null,
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
-        </svg>
-      ),
-    },
-    {
-      label: 'Avg Cost',
-      value: avgCombinedCost > 0 ? `${(avgCombinedCost / 100).toFixed(3)}¢` : '--',
-      change: avgCombinedCost > 0 && avgCombinedCost < 98.5 ? 'positive' : null,
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-        </svg>
-      ),
-    },
-    {
-      label: 'Best Trade',
-      value: bestTrade > 0 ? `$${(bestTrade / 100).toFixed(2)}` : '--',
-      change: bestTrade > 0 ? 'positive' : null,
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
-        </svg>
-      ),
-    },
-  ]
+  function formatPnlColor(cents: number) {
+    if (cents > 0) return 'text-emerald-400'
+    if (cents < 0) return 'text-red-400'
+    return 'text-gray-500'
+  }
+
+  // ── BTC Sparkline ──
+  function renderSparkline() {
+    const history = botState.btcPriceHistory
+    if (history.length < 2) return null
+
+    const prices = history.map(p => p.price)
+    const min = Math.min(...prices)
+    const max = Math.max(...prices)
+    const range = max - min || 1
+
+    const width = 280
+    const height = 40
+    const points = prices.map((p, i) => {
+      const x = (i / (prices.length - 1)) * width
+      const y = height - ((p - min) / range) * height
+      return `${x},${y}`
+    }).join(' ')
+
+    // Determine color based on recent trend
+    const last5 = prices.slice(-5)
+    const isUp = last5[last5.length - 1] >= last5[0]
+    const color = isUp ? '#34d399' : '#f87171'
+
+    return (
+      <svg width={width} height={height} className="opacity-60">
+        <polyline
+          fill="none"
+          stroke={color}
+          strokeWidth="1.5"
+          points={points}
+        />
+      </svg>
+    )
+  }
+
+  const spread = botState.yesBid !== null && botState.yesAsk !== null
+    ? botState.yesAsk - botState.yesBid : null
+
+  // ── Audit filtering ──
+  const filteredAudit = auditLog.filter(a => {
+    switch (auditFilter) {
+      case 'filled': return a.status === 'filled' && !a.trigger.startsWith('EXIT:')
+      case 'skipped': return a.status === 'canceled' && !a.trigger.startsWith('EXIT:')
+      case 'exits': return a.trigger.startsWith('EXIT:')
+      case 'errors': return a.status === 'error'
+      default: return true
+    }
+  })
 
   return (
-    <main className="min-h-screen bg-[#171717]">
+    <main className="min-h-screen bg-[#0a0a0a]">
       {/* Header */}
-      <header className="sticky top-0 z-10 border-b border-white/10 bg-[#171717]/80 backdrop-blur-xl">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
+      <header className="sticky top-0 z-10 border-b border-white/10 bg-[#0a0a0a]/90 backdrop-blur-xl">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
             <div>
-              <h1 className="text-xl font-semibold tracking-tight text-white">KalshiSniper</h1>
-              <p className="text-xs text-gray-500 mt-0.5">Parity Arbitrage Bot</p>
+              <h1 className="text-lg font-semibold tracking-tight text-white">KalshiSniper</h1>
+              <p className="text-[10px] text-gray-500">Latency Arbitrage Bot</p>
             </div>
           </div>
-          
-          <div className="flex items-center gap-3">
-            {/* Status Badges */}
-            <span
-              className={`badge ${
-                wsStatus === 'connected'
-                  ? 'badge-success'
-                  : wsStatus === 'connecting'
-                    ? 'badge-warning'
-                    : 'badge-danger'
-              }`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${
-                wsStatus === 'connected' ? 'bg-emerald-400 animate-pulse' : wsStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-400'
-              }`} />
-              {wsStatus === 'connected' ? 'Live' : wsStatus === 'connecting' ? 'Connecting' : 'Offline'}
+          <div className="flex items-center gap-2">
+            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded-full ${connected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+              {connected ? 'LIVE' : 'OFFLINE'}
             </span>
-            
-            {state && (
-              <>
-                <span
-                  className={`badge ${
-                    state?.paperMode
-                      ? 'badge-warning'
-                      : state?.running
-                        ? 'badge-success'
-                        : 'badge-danger'
-                  }`}
-                >
-                  {state?.paperMode ? 'PAPER' : state?.running ? 'LIVE' : 'PAUSED'}
-                </span>
-                {state?.dryRun && (
-                  <span className="badge badge-info">DRY RUN</span>
-                )}
-              </>
-            )}
-
-            {/* Bot Control Button */}
-            {state && (
-              <button
-                onClick={() => {
-                  if (state.running) {
-                    controlBot('stop')
-                  } else {
-                    controlBot('start')
-                  }
-                }}
-                disabled={botAction !== 'idle'}
-                className={`btn ${
-                  state.running
-                    ? 'btn-danger disabled:opacity-50'
-                    : 'btn-success disabled:opacity-50'
-                }`}
-              >
-                {botAction === 'starting' ? (
-                  <>
-                    <div className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
-                    Starting...
-                  </>
-                ) : botAction === 'stopping' ? (
-                  <>
-                    <div className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
-                    Stopping...
-                  </>
-                ) : state.running ? (
-                  <>
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                      <rect x="6" y="4" width="4" height="16" rx="1" />
-                      <rect x="14" y="4" width="4" height="16" rx="1" />
-                    </svg>
-                    Stop
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M8 5v14l11-7z" />
-                    </svg>
-                    Start
-                  </>
-                )}
-              </button>
-            )}
-
-            <Link
-              href="/settings"
-              className="btn btn-secondary"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
+            <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full ${botState.dryRun ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+              {botState.dryRun ? 'DRY RUN' : 'LIVE'}
+            </span>
+            <Link href="/settings" className="px-3 py-1 text-xs text-gray-400 hover:text-white border border-white/10 rounded-lg transition-colors">
               Settings
             </Link>
           </div>
         </div>
       </header>
 
-      <div className="max-w-7xl mx-auto px-6 py-6">
-        {/* Bot Message */}
-        {botMessage && (
-          <div
-            className={`mb-6 p-4 rounded-lg border ${
-              botMessage.type === 'success'
-                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                : 'bg-red-500/10 border-red-500/20 text-red-400'
-            }`}
-          >
-            {botMessage.text}
-          </div>
-        )}
+      <div className="max-w-7xl mx-auto px-4 py-4 space-y-3">
 
-        {/* Key Metrics Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-          {stats.map(({ label, value, change, icon }) => (
-            <div
-              key={label}
-              className="card p-4"
-            >
-              <div className="flex items-center gap-2 mb-2">
-                <span className="text-gray-500">{icon}</span>
-                <div className="text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  {label}
+        {/* ═══════════════════ P&L CARD ═══════════════════ */}
+        <div className="bg-[#111] border border-white/5 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[10px] uppercase tracking-wider text-gray-500">💰 P&L Dashboard</span>
+            {botState.totalTrades > 0 && (
+              <span className={`text-xs font-medium px-2 py-0.5 rounded ${botState.winRate >= 50 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`}>
+                Win Rate: {botState.winRate}%
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-3">
+            {/* Realized P&L */}
+            <div>
+              <div className="text-[10px] text-gray-600 mb-0.5">Realized P&L</div>
+              <div className={`text-2xl font-mono font-bold ${formatPnlColor(botState.realizedPnLCents)}`}>
+                {formatPnl(botState.realizedPnLCents)}
+              </div>
+            </div>
+
+            {/* Unrealized P&L */}
+            <div>
+              <div className="text-[10px] text-gray-600 mb-0.5">Unrealized P&L</div>
+              <div className={`text-2xl font-mono font-bold ${formatPnlColor(botState.unrealizedPnLCents)}`}>
+                {formatPnl(botState.unrealizedPnLCents)}
+              </div>
+            </div>
+
+            {/* Total Trades */}
+            <div>
+              <div className="text-[10px] text-gray-600 mb-0.5">Completed Trades</div>
+              <div className="text-2xl font-mono font-bold text-white">
+                {botState.totalTrades}
+              </div>
+            </div>
+
+            {/* Avg Latency */}
+            <div>
+              <div className="text-[10px] text-gray-600 mb-0.5">Decision Latency</div>
+              <div className="text-2xl font-mono font-bold text-white">
+                {botState.avgLatencyMs > 0 ? `${botState.avgLatencyMs}ms` : '--'}
+              </div>
+            </div>
+          </div>
+
+          {/* Exit Stats Row */}
+          <div className="grid grid-cols-5 gap-2 pt-3 border-t border-white/5">
+            <div className="text-center">
+              <div className="text-[10px] text-gray-600">Exits Fired</div>
+              <div className="text-sm font-mono text-white">{botState.exitOrdersPlaced}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-[10px] text-red-500/60">🛑 Stop-Losses</div>
+              <div className="text-sm font-mono text-red-400">{botState.stopLossesTriggered}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-[10px] text-emerald-500/60">💰 Take-Profits</div>
+              <div className="text-sm font-mono text-emerald-400">{botState.takeProfitsTriggered}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-[10px] text-gray-500">⏰ Time Exits</div>
+              <div className="text-sm font-mono text-gray-400">{botState.timeExitsTriggered}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-[10px] text-gray-600">Best Trade</div>
+              <div className="text-sm font-mono text-emerald-400">
+                {botState.bestTradeCents > 0 ? `+${botState.bestTradeCents}¢` : '--'}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ═══════════════════ DUAL PRICE FEED ═══════════════════ */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {/* Binance Futures BTC/USDT */}
+          <div className="bg-[#111] border border-white/5 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] uppercase tracking-wider text-gray-500">⚡ Binance Futures BTC/USDT</span>
+              <span className="text-[10px] text-gray-600">Real-time</span>
+            </div>
+            <div className="text-3xl font-mono font-bold text-amber-400 tracking-tight">
+              {formatBtc(btcPriceRef.current)}
+            </div>
+
+            {/* Momentum indicators */}
+            <div className="flex gap-3 mt-2">
+              {botState.btcChange2s !== null && (
+                <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${
+                  botState.btcChange2s >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'
+                }`}>
+                  2s: {botState.btcChange2s >= 0 ? '+' : ''}${botState.btcChange2s.toFixed(0)}
+                </span>
+              )}
+              {botState.btcChange5s !== null && (
+                <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${
+                  botState.btcChange5s >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'
+                }`}>
+                  5s: {botState.btcChange5s >= 0 ? '+' : ''}${botState.btcChange5s.toFixed(0)}
+                </span>
+              )}
+              {botState.btcChange30s !== null && (
+                <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${
+                  botState.btcChange30s >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'
+                }`}>
+                  30s: {botState.btcChange30s >= 0 ? '+' : ''}${botState.btcChange30s.toFixed(0)}
+                </span>
+              )}
+            </div>
+
+            {/* Sparkline */}
+            <div className="mt-2">
+              {renderSparkline()}
+            </div>
+          </div>
+
+          {/* Kalshi Orderbook */}
+          <div className="bg-[#111] border border-white/5 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] uppercase tracking-wider text-gray-500">📖 Kalshi Orderbook</span>
+              {botState.orderbookReady ? (
+                <span className="text-[10px] text-emerald-500">Ready</span>
+              ) : (
+                <span className="text-[10px] text-amber-500">Waiting...</span>
+              )}
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <div className="text-[10px] text-gray-500">YES Bid</div>
+                <div className="text-2xl font-mono font-semibold text-emerald-400">
+                  {yesBidRef.current !== null ? `${yesBidRef.current}¢` : '--'}
                 </div>
               </div>
-              <div className={`text-2xl font-semibold ${
-                change === 'positive' ? 'text-emerald-400' : change === 'negative' ? 'text-red-400' : 'text-white'
-              }`}>
-                {value}
+              <div>
+                <div className="text-[10px] text-gray-500">YES Ask</div>
+                <div className="text-2xl font-mono font-semibold text-red-400">
+                  {yesAskRef.current !== null ? `${yesAskRef.current}¢` : '--'}
+                </div>
               </div>
+              <div>
+                <div className="text-[10px] text-gray-500">Spread</div>
+                <div className="text-2xl font-mono font-semibold text-white">
+                  {spread !== null ? `${spread}¢` : '--'}
+                </div>
+              </div>
+            </div>
+            <div className="text-[10px] text-gray-600 mt-1">
+              YES Ask = 100¢ − max(NO bids) | Binary parity
+            </div>
+          </div>
+        </div>
+
+        {/* ═══════════════════ EDGE MONITOR + OPEN POSITIONS ═══════════════════ */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {/* Edge Distance Card */}
+          <div
+            className={`rounded-xl p-4 transition-all duration-300 ${
+              edgeFlash
+                ? 'border-2 border-emerald-400 bg-emerald-500/10 shadow-lg shadow-emerald-500/20'
+                : 'border border-white/5 bg-[#111]'
+            }`}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-wider text-gray-500">🎯 Edge Monitor</span>
+                {edgeFlash && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-emerald-500/20 text-emerald-300 animate-pulse">
+                    ⚡ EDGE FORMING
+                  </span>
+                )}
+              </div>
+              {botState.strikePrice ? (
+                <span className="text-[10px] text-gray-600">Strike: ${botState.strikePrice.toLocaleString()}</span>
+              ) : (
+                <span className="text-[10px] text-amber-500">Waiting...</span>
+              )}
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between items-baseline">
+                <span className="text-[10px] text-gray-500">BTC → Strike</span>
+                <span className={`text-xl font-mono font-bold ${edgeFlash ? 'text-emerald-300' : 'text-white'}`}>
+                  {botState.strikePrice && btcPriceRef.current
+                    ? `$${Math.abs(botState.strikePrice - btcPriceRef.current).toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+                    : '--'}
+                </span>
+              </div>
+              <div className="flex justify-between items-baseline">
+                <span className="text-[10px] text-gray-500">YES Ask</span>
+                <span className={`text-xl font-mono font-bold ${edgeFlash ? 'text-emerald-300' : 'text-red-400'}`}>
+                  {yesAskRef.current !== null ? `${yesAskRef.current}¢` : '--'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Open Positions */}
+          <div className="bg-[#111] border border-white/5 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-[10px] uppercase tracking-wider text-gray-500">📦 Open Positions</span>
+              <span className={`text-xs font-mono ${botState.openPositions.length > 0 ? 'text-amber-400' : 'text-gray-600'}`}>
+                {botState.openPositions.length} active
+              </span>
+            </div>
+            {botState.openPositions.length === 0 ? (
+              <div className="text-center py-4 text-gray-700 text-xs">No open positions</div>
+            ) : (
+              <div className="space-y-2">
+                {botState.openPositions.map(pos => {
+                  const ageColor = pos.ageSeconds > botState.maxHoldSeconds * 0.8
+                    ? 'text-red-400'
+                    : pos.ageSeconds > botState.maxHoldSeconds * 0.5
+                    ? 'text-amber-400'
+                    : 'text-gray-400'
+
+                  return (
+                    <div key={pos.id} className="bg-white/[0.02] border border-white/5 rounded-lg p-2">
+                      <div className="flex justify-between items-center">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
+                            pos.side === 'yes' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-blue-500/10 text-blue-400'
+                          }`}>
+                            {pos.side.toUpperCase()}
+                          </span>
+                          <span className="text-xs font-mono text-white">@ {pos.entryPriceCents}¢</span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className={`text-[10px] font-mono ${formatPnlColor(pos.estimatedPnLCents)}`}>
+                            {formatPnl(pos.estimatedPnLCents)}
+                          </span>
+                          <span className={`text-[10px] font-mono ${ageColor}`}>
+                            ⏱️ {pos.ageSeconds}s / {botState.maxHoldSeconds}s
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ═══════════════════ BOT STATS ═══════════════════ */}
+        <div className="grid grid-cols-5 gap-2">
+          {[
+            { label: 'Orders Fired', value: botState.ordersPlaced, color: 'text-white' },
+            { label: 'Fills', value: botState.fillsReceived, color: 'text-emerald-400' },
+            { label: 'Inv YES', value: `${botState.inventoryYes}/5`, color: 'text-white' },
+            { label: 'Inv NO', value: `${botState.inventoryNo}/5`, color: 'text-white' },
+            { label: 'Exit Config', value: `${botState.maxHoldSeconds}s / $${botState.stopLossBtcUsd} / ${botState.takeProfitCents}¢`, color: 'text-gray-400' },
+          ].map(s => (
+            <div key={s.label} className="bg-[#111] border border-white/5 rounded-lg p-3 text-center">
+              <div className="text-[10px] text-gray-500 mb-0.5">{s.label}</div>
+              <div className={`text-sm font-semibold font-mono ${s.color}`}>{s.value}</div>
             </div>
           ))}
         </div>
 
-        {/* Today's Summary */}
-        {today && (
-          <div className="card p-5 mb-6">
-            <h2 className="text-sm font-medium text-gray-400 mb-4">Today's Summary</h2>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-6">
-              <div>
-                <div className="text-xs text-gray-500 mb-1">Parity Fills</div>
-                <div className="text-2xl font-semibold text-white">{today.parityTrades ?? filledTrades.length}</div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500 mb-1">Opportunities</div>
-                <div className="text-2xl font-semibold text-purple-400">{today.opportunitiesSeen ?? parityOpportunities.length}</div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500 mb-1">Capture Rate</div>
-                <div className="text-2xl font-semibold text-amber-400">{oppToTradeRatio}%</div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500 mb-1">Total P&L</div>
-                <div className={`text-2xl font-semibold ${(today.pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  ${(today.pnl ?? 0) >= 0 ? '+' : ''}{(today.pnl ?? 0).toFixed(2)}
+        {/* ═══════════════════ EXIT STRATEGY INFO (collapsible) ═══════════════════ */}
+        <div className="bg-[#111] border border-white/5 rounded-xl overflow-hidden">
+          <button
+            onClick={() => setShowExitInfo(!showExitInfo)}
+            className="w-full px-4 py-2 flex items-center justify-between text-left hover:bg-white/[0.02]"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-wider text-gray-500">🛡️ Exit Strategy Configuration</span>
+            </div>
+            <span className="text-xs text-gray-500">{showExitInfo ? '▲' : '▼'}</span>
+          </button>
+          {showExitInfo && (
+            <div className="px-4 pb-3 space-y-2 border-t border-white/5 pt-3">
+              <div className="grid grid-cols-3 gap-4 text-xs">
+                <div>
+                  <div className="text-gray-600 text-[10px]">Max Hold Time</div>
+                  <div className="font-mono text-white">{botState.maxHoldSeconds}s</div>
+                  <div className="text-gray-700 text-[10px]">Auto-exit after this duration</div>
+                </div>
+                <div>
+                  <div className="text-gray-600 text-[10px]">Stop-Loss</div>
+                  <div className="font-mono text-red-400">${botState.stopLossBtcUsd} BTC</div>
+                  <div className="text-gray-700 text-[10px]">Exit if BTC reverses this much</div>
+                </div>
+                <div>
+                  <div className="text-gray-600 text-[10px]">Take-Profit</div>
+                  <div className="font-mono text-emerald-400">{botState.takeProfitCents}¢</div>
+                  <div className="text-gray-700 text-[10px]">Exit when position hits this profit</div>
                 </div>
               </div>
-            </div>
-          </div>
-        )}
-
-        {/* Tabbed Table Section */}
-        <div className="card overflow-hidden">
-          {/* Tab Headers */}
-          <div className="px-5 py-3 border-b border-white/10 flex items-center gap-2">
-            <button
-              onClick={() => setActiveTab('trades')}
-              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                activeTab === 'trades'
-                  ? 'bg-white/10 text-white'
-                  : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
-              }`}
-            >
-              Parity Trades
-              <span className="ml-1.5 text-xs opacity-60">({parityTrades.length})</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('opportunities')}
-              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                activeTab === 'opportunities'
-                  ? 'bg-white/10 text-white'
-                  : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
-              }`}
-            >
-              Opportunities
-              <span className="ml-1.5 text-xs opacity-60">({parityOpportunities.length})</span>
-            </button>
-          </div>
-
-          {/* Parity Trades Table */}
-          {activeTab === 'trades' && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-gray-500 text-xs uppercase tracking-wider">
-                  <tr>
-                    {['Time', 'Event', 'YES Ask', 'NO Ask', 'Combined', 'Profit', 'Contracts', 'Status', 'Legs'].map(h => (
-                      <th key={h} className="font-medium">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {parityTrades.map((t: any) => (
-                    <tr key={t.id}>
-                      <td className="text-gray-500 tabular-nums whitespace-nowrap">
-                        {new Date(t.createdAt).toLocaleTimeString()}
-                      </td>
-                      <td className="font-medium text-xs">{t.eventTicker}</td>
-                      <td className="tabular-nums text-gray-300">{(t.yesAsk ?? 0).toFixed(1)}¢</td>
-                      <td className="tabular-nums text-gray-300">{(t.noAsk ?? 0).toFixed(1)}¢</td>
-                      <td className={`tabular-nums font-medium ${
-                        (t.combinedCost ?? 100) < 98.5 ? 'text-emerald-400' : 'text-gray-300'
-                      }`}>
-                        {(t.combinedCost ?? 0).toFixed(1)}¢
-                      </td>
-                      <td className={`font-medium tabular-nums ${
-                        (t.actualProfit ?? 0) > 0 ? 'text-emerald-400' : 'text-gray-500'
-                      }`}>
-                        {t.actualProfit != null ? `$${(t.actualProfit / 100).toFixed(2)}` : '—'}
-                      </td>
-                      <td className="tabular-nums">{t.count ?? '—'}</td>
-                      <td>
-                        <span
-                          className={`badge ${
-                            t.status === 'FILLED'
-                              ? 'badge-success'
-                              : t.status === 'PARTIAL_FILL'
-                                ? 'badge-warning'
-                                : t.status === 'ORDERED'
-                                  ? 'badge-info'
-                                  : t.status === 'CANCELLED' || t.status === 'EXPIRED'
-                                    ? 'badge-danger'
-                                    : 'badge-secondary'
-                          }`}
-                        >
-                          {t.status}
-                        </span>
-                      </td>
-                      <td className="text-xs">
-                        <div className="flex gap-2">
-                          {t.yesFilled ? (
-                            <span className="badge badge-success text-xs">YES ✓</span>
-                          ) : t.yesOrderId ? (
-                            <span className="badge badge-info text-xs">YES ⏳</span>
-                          ) : (
-                            <span className="text-gray-600">—</span>
-                          )}
-                          {t.noFilled ? (
-                            <span className="badge badge-success text-xs">NO ✓</span>
-                          ) : t.noOrderId ? (
-                            <span className="badge badge-info text-xs">NO ⏳</span>
-                          ) : (
-                            <span className="text-gray-600">—</span>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {parityTrades.length === 0 && (
-                    <tr>
-                      <td colSpan={9} className="px-6 py-16 text-center">
-                        <div className="text-gray-600">
-                          <div className="text-4xl mb-3">🎯</div>
-                          <div className="text-sm">No parity trades yet</div>
-                          <div className="text-xs text-gray-700 mt-1">Scanning all markets for opportunities...</div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+              <div className="text-[10px] text-gray-600 pt-1">
+                Entry: <code className="text-gray-500">SPIKE_THRESHOLD=$50</code> · <code className="text-gray-500">MIN_EDGE_CENTS=1¢</code> &nbsp;|&nbsp; Exit: <code className="text-gray-500">MAX_HOLD_SECONDS</code> · <code className="text-gray-500">STOP_LOSS_BTC_USD</code> · <code className="text-gray-500">TAKE_PROFIT_CENTS</code>
+              </div>
             </div>
           )}
+        </div>
 
-          {/* Opportunities Table */}
-          {activeTab === 'opportunities' && (
+        {/* ═══════════════════ AUDIT LOG ═══════════════════ */}
+        <div className="bg-[#111] border border-white/5 rounded-xl overflow-hidden">
+          <div className="px-4 py-2 border-b border-white/5 flex items-center justify-between flex-wrap gap-2">
+            <h2 className="text-xs font-medium text-gray-400">Snipe Audit Log</h2>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-600">{auditLog.length} events</span>
+              <div className="flex gap-1">
+                {(['all', 'filled', 'skipped', 'exits', 'errors'] as const).map(f => (
+                  <button
+                    key={f}
+                    onClick={() => setAuditFilter(f)}
+                    className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
+                      auditFilter === f
+                        ? 'bg-white/10 text-white'
+                        : 'text-gray-600 hover:text-gray-400'
+                    }`}
+                  >
+                    {f}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          {filteredAudit.length === 0 ? (
+            <div className="px-4 py-12 text-center text-gray-700">
+              <div className="text-2xl mb-2">🔫</div>
+              <div className="text-sm">Waiting for BTC spike...</div>
+              <div className="text-xs text-gray-800 mt-1">Snipe events will appear here in real-time</div>
+            </div>
+          ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-gray-500 text-xs uppercase tracking-wider">
+              <table className="w-full text-xs font-mono">
+                <thead className="text-gray-600 uppercase tracking-wider">
                   <tr>
-                    {['Time', 'Event', 'Asset', 'YES Bid', 'NO Bid', 'YES Ask', 'NO Ask', 'Combined', 'Profit', 'Triggered'].map(h => (
-                      <th key={h} className="font-medium">{h}</th>
+                    {['Time', 'Trigger', 'Action', 'Edge', 'Latency', 'Status'].map(h => (
+                      <th key={h} className="font-medium text-left px-2 py-2">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {parityOpportunities.map((o: any) => (
-                    <tr key={o.id}>
-                      <td className="text-gray-500 tabular-nums whitespace-nowrap">
-                        {new Date(o.createdAt).toLocaleTimeString()}
+                  {filteredAudit.slice(0, 50).map((a, i) => (
+                    <tr key={i} className="hover:bg-white/[0.02]">
+                      <td className="px-2 py-1.5 text-gray-500 tabular-nums whitespace-nowrap">
+                        {formatTime(a.time)}
                       </td>
-                      <td className="font-medium text-xs">{o.eventTicker}</td>
-                      <td>{o.asset}</td>
-                      <td className="tabular-nums text-gray-300">{o.yesBid.toFixed(1)}¢</td>
-                      <td className="tabular-nums text-gray-300">{o.noBid.toFixed(1)}¢</td>
-                      <td className="tabular-nums text-gray-300">{o.yesAsk.toFixed(1)}¢</td>
-                      <td className="tabular-nums text-gray-300">{o.noAsk.toFixed(1)}¢</td>
-                      <td className={`tabular-nums font-medium ${
-                        o.combinedCost < 98.5 ? 'text-emerald-400' : 'text-gray-300'
-                      }`}>
-                        {o.combinedCost.toFixed(1)}¢
+                      <td className="px-2 py-1.5">
+                        <div className="flex items-center gap-1">
+                          {a.trigger.includes('EXIT:') ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-500/10 text-orange-400">
+                              {a.trigger}
+                            </span>
+                          ) : a.trigger.includes('Spike') ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-400">
+                              {a.trigger}
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-400">
+                              {a.trigger}
+                            </span>
+                          )}
+                          {/* Skip reason badge */}
+                          {a.skipReason && (
+                            <span className="px-1 py-0.5 rounded text-[9px] bg-gray-500/10 text-gray-500">
+                              {a.skipReason}
+                            </span>
+                          )}
+                        </div>
+                        {/* Edge explanation tooltip */}
+                        {a.edgeExplanation && (
+                          <div className="text-[9px] text-gray-700 mt-0.5 max-w-xs truncate" title={a.edgeExplanation}>
+                            {a.edgeExplanation}
+                          </div>
+                        )}
                       </td>
-                      <td className="tabular-nums text-emerald-400">
-                        ${(o.guaranteedProfit / 100).toFixed(2)}
+                      <td className="px-2 py-1.5 text-gray-300 text-[11px]">{a.action}</td>
+                      <td className={`px-2 py-1.5 tabular-nums ${formatPnlColor(a.edge)}`}>
+                        {a.edge !== 0 ? formatPnl(a.edge) : '—'}
                       </td>
-                      <td>
-                        <span className={`badge ${o.triggered ? 'badge-success' : 'badge-secondary'}`}>
-                          {o.triggered ? 'Yes' : 'No'}
+                      <td className="px-2 py-1.5 text-gray-500 tabular-nums">
+                        {a.latencyMs !== undefined ? `${a.latencyMs}ms` : '--'}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                          a.status === 'filled' ? 'bg-emerald-500/10 text-emerald-400' :
+                          a.status === 'dry_run' ? 'bg-amber-500/10 text-amber-400' :
+                          a.status === 'canceled' ? 'bg-gray-500/10 text-gray-400' :
+                          'bg-red-500/10 text-red-400'
+                        }`}>
+                          {a.status}
                         </span>
                       </td>
                     </tr>
                   ))}
-                  {parityOpportunities.length === 0 && (
-                    <tr>
-                      <td colSpan={10} className="px-6 py-16 text-center">
-                        <div className="text-gray-600">
-                          <div className="text-4xl mb-3">⚡</div>
-                          <div className="text-sm">No opportunities detected yet</div>
-                          <div className="text-xs text-gray-700 mt-1">Scanner checks all markets every 2 minutes</div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
                 </tbody>
               </table>
             </div>
@@ -548,22 +701,18 @@ export default function Dashboard() {
         </div>
 
         {/* Strategy Info */}
-        <div className="card p-5 mt-6 bg-white/[0.02] border-purple-500/20">
-          <h3 className="text-sm font-medium mb-3 text-white">🎯 How Parity Arbitrage Works</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-400">
-            <div>
-              <div className="font-medium text-gray-300 mb-1">1. Scan</div>
-              <p>Real-time WebSocket stream from all Kalshi binary markets — crypto, politics, weather, sports, and more.</p>
-            </div>
-            <div>
-              <div className="font-medium text-gray-300 mb-1">2. Detect</div>
-              <p>When <code className="text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded text-xs">YES + NO &lt; $1.00</code>, a risk-free profit exists. The bot scans every 500ms.</p>
-            </div>
-            <div>
-              <div className="font-medium text-gray-300 mb-1">3. Execute</div>
-              <p>Places <code className="text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded text-xs">post_only</code> orders on both sides. Both fill → guaranteed $1.00 payout.</p>
-            </div>
-          </div>
+        <div className="p-3 bg-blue-500/5 border border-blue-500/10 rounded-lg">
+          <p className="text-[11px] text-blue-400/80">
+            <strong>Strategy:</strong> Binance Futures (aggTrade) → event-driven spike detection →
+            momentum filter (30s confirm) → depth check → Kalshi IOC snipe →
+            event-driven exit (stop-loss / take-profit / time).
+            {botState.dryRun
+              ? ' DRY RUN mode: payloads logged but no real orders placed.'
+              : ' LIVE execution enabled.'}
+          </p>
+          <p className="text-[10px] text-blue-400/50 mt-1">
+            ⚠️ Before going live: Fund Kalshi account, verify exit config, watch for fill quality in DRY RUN. Defaults: SPIKE_THRESHOLD=$50, MIN_EDGE=1¢.
+          </p>
         </div>
       </div>
     </main>

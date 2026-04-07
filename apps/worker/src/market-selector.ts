@@ -9,7 +9,7 @@
  * - KXBTCD: Daily expiries
  *
  * Boot sequence:
- * 1. Get current BTC spot price from Coinbase
+ * 1. Get current BTC spot price from Binance Futures
  * 2. Query Kalshi with series_ticker=KXBTC15M (fast-paced, best edge)
  * 3. Extract strike price from ticker/subtitle
  * 4. Select market with smallest |strike - spot| difference
@@ -178,18 +178,18 @@ function parseBtcMarkets(
 }
 
 /**
- * Wait for Coinbase price feed to have a valid price.
+ * Wait for Binance price feed to have a valid price.
  * Event-driven: resolves the moment the first trade event arrives.
  */
 export async function waitForBtcPrice(
   oracle: { setPriceUpdateCallback: (cb: any) => void; getCurrentPrice: () => number },
   maxWaitMs = 15000,
 ): Promise<number> {
-  console.log(`   ⏳ Waiting for first BTC price from Coinbase...`)
+  console.log(`   ⏳ Waiting for first BTC price from Binance Futures...`)
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error(`Failed to get BTC price from Coinbase after ${maxWaitMs / 1000}s`))
+      reject(new Error(`Failed to get BTC price from Binance Futures after ${maxWaitMs / 1000}s`))
     }, maxWaitMs)
 
     // Resolve the moment the first trade event arrives

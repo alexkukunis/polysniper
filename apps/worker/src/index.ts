@@ -4,7 +4,7 @@ config({ path: resolve(__dirname, '../../../.env') })
 
 import { WebSocketBridge } from './ws-bridge'
 import { LatencySniper } from './simple-bot'
-import { Coinbase } from './coinbase'
+import { BinanceOracle } from './coinbase'
 import { KalshiAPI } from './kalshi-api'
 import { selectAtmMarket, waitForBtcPrice } from './market-selector'
 
@@ -14,9 +14,14 @@ const key = process.env.KALSHI_ACCESS_KEY || ''
 const secret = process.env.KALSHI_PRIVATE_KEY || ''
 const demo = process.env.KALSHI_DEMO !== 'false'
 const dryRun = process.env.DRY_RUN !== 'false'  // Default: dry run for safety
-const spikeThreshold = parseInt(process.env.SPIKE_THRESHOLD || '25')
+const spikeThreshold = parseInt(process.env.SPIKE_THRESHOLD || '50')
 const spikeWindowMs = parseInt(process.env.SPIKE_WINDOW_MS || '2000')
-const minEdgeCents = parseInt(process.env.MIN_EDGE_CENTS || '2')
+const minEdgeCents = parseInt(process.env.MIN_EDGE_CENTS || '3')  // Raised from 1 to 3 (covers fees)
+
+// Exit strategy config (tweak these before going live!)
+const maxHoldSeconds = parseInt(process.env.MAX_HOLD_SECONDS || '30')
+const stopLossBtcUsd = parseInt(process.env.STOP_LOSS_BTC_USD || '30')
+const takeProfitCents = parseInt(process.env.TAKE_PROFIT_CENTS || '10')
 
 if (!key || !secret) {
   console.error('❌ Missing API credentials!')
@@ -49,10 +54,23 @@ async function selectAndRestart(btcPrice: number) {
 
 async function main() {
   console.log('\n' + '🚀'.repeat(25))
-  console.log('KalshiSniper — Latency Arbitrage Bot')
+  console.log('KalshiSniper — Latency Arbitrage Bot v2')
   console.log('='.repeat(60))
-  console.log(`Environment: ${demo ? 'DEMO' : 'LIVE'}`)
-  console.log(`Dry Run:     ${dryRun ? 'YES (simulated only)' : 'NO (live execution)'}`)
+  console.log(`Environment:     ${demo ? 'DEMO' : 'LIVE'}`)
+  console.log(`Dry Run:         ${dryRun ? 'YES (simulated only)' : 'NO (live execution)'}`)
+  console.log('─'.repeat(60))
+  console.log(`Entry Config:`)
+  console.log(`  Price Feed:      Binance Futures (btcusdt@aggTrade)`)
+  console.log(`  Spike Thresh:    $${spikeThreshold} (2s window)`)
+  console.log(`  Min Edge:        ${minEdgeCents}¢ + dynamic fee adj`)
+  console.log(`  Momentum Filter: 30s trend must confirm 2s spike`)
+  console.log(`  Depth Check:     Require ≥1 contract at target`)
+  console.log(`Exit Strategy:`)
+  console.log(`  Max Hold:        ${maxHoldSeconds}s`)
+  console.log(`  Stop-Loss:       $${stopLossBtcUsd} BTC reversal`)
+  console.log(`  Take-Profit:     ${takeProfitCents}¢`)
+  console.log(`  Exit Mode:       Event-driven (every tick)`)
+  console.log(`  SL Spread Cross: 1¢ concession for guaranteed fill`)
   console.log('='.repeat(60) + '\n')
 
   // Initialize Kalshi API once (reused across market rotations)
@@ -77,18 +95,18 @@ async function main() {
   })
   await bridge.start()
 
-  // Step 2: Connect to Coinbase
-  console.log('📡 Step 1: Connecting to Coinbase...')
+  // Step 2: Connect to Binance Futures
+  console.log('📡 Step 1: Connecting to Binance Futures...')
 
   let btcPrice = 0
-  const coinbase = new Coinbase({
+  const oracle = new BinanceOracle({
     windowMs: spikeWindowMs,
     thresholdUsd: spikeThreshold,
     onSpike: () => {},  // Temp no-op — replaced below
   })
-  coinbase.start()
+  oracle.start()
 
-  btcPrice = await waitForBtcPrice(coinbase)
+  btcPrice = await waitForBtcPrice(oracle)
   console.log(`✅ BTC Price: $${btcPrice.toLocaleString()}\n`)
 
   // Step 3: Auto-select ATM market
@@ -128,12 +146,15 @@ async function main() {
     btcMarketTicker,
     strikePrice,
     minEdgeCents: minEdgeCents,
-    coinbase,
+    oracle,
+    maxHoldSeconds,
+    stopLossBtcUsd,
+    takeProfitCents,
   }, bridge)
 
   // Wire event-driven callback
-  coinbase.setSpikeCallback((event) => sniper!.onSpike(event))
-  console.log('✅ Coinbase callback registered → sniper\n')
+  oracle.setSpikeCallback((event) => sniper!.onSpike(event))
+  console.log('✅ Binance callback registered → sniper\n')
 
   await sniper.start()
 
@@ -141,7 +162,7 @@ async function main() {
     console.log('\n⏹️  Shutting down...')
     sniper?.stop()
     bridge.stop()
-    coinbase.stop()
+    oracle.stop()
     process.exit(0)
   }
   process.on('SIGINT', shutdown)
