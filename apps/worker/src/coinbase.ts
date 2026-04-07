@@ -24,13 +24,20 @@ export interface PriceEvent {
 export class BinanceOracle {
   private ws: WebSocket | null = null
   private priceBuffer: { price: number; timestamp: number }[] = []
-  private readonly windowMs: number
-  private readonly thresholdUsd: number
+  readonly windowMs: number
+  readonly thresholdUsd: number
   private onSpike: (event: PriceEvent) => void
   private onPriceUpdate: (price: number) => void  // fires on EVERY trade
   private reconnectTimer: NodeJS.Timeout | null = null
+  private reconnectAttempts = 0
   private currentPrice = 0
   private url = 'wss://fstream.binance.com/ws/btcusdt@aggTrade'
+
+  // ── Heartbeat ──
+  private heartbeatTimer: NodeJS.Timeout | null = null
+  private lastMessageTime = 0
+  private readonly HEARTBEAT_INTERVAL_MS = 15000
+  private readonly STALE_CONNECTION_MS = 45000
 
   // Rolling price history for momentum context (last 60 seconds)
   private priceHistory: { price: number; timestamp: number }[] = []
@@ -64,6 +71,7 @@ export class BinanceOracle {
 
   stop() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.stopHeartbeat()
     if (this.ws) { this.ws.close(); this.ws = null }
   }
 
@@ -115,15 +123,33 @@ export class BinanceOracle {
   private connect() {
     console.log(`🔗 Connecting to Binance Futures WebSocket (btcusdt@aggTrade)...`)
 
-    this.ws = new WebSocket(this.url)
+    this.ws = new WebSocket(this.url, {
+      perMessageDeflate: {
+        zlibDeflateOptions: {
+          chunkSize: 1024,
+          memLevel: 7,
+          level: 6,
+        },
+        zlibInflateOptions: {
+          chunkSize: 10 * 1024,
+        },
+        clientNoContextTakeover: true,
+        serverNoContextTakeover: true,
+        threshold: 256,
+      },
+    })
 
     this.ws.on('open', () => {
       console.log('✅ Binance Futures WebSocket connected')
+      this.lastMessageTime = Date.now()
+      this.reconnectAttempts = 0
+      this.startHeartbeat()
     })
 
     // EVENT-DRIVEN: parse aggTrade messages and fire spike check
     this.ws.on('message', (data: Buffer) => {
       try {
+        this.lastMessageTime = Date.now()
         const msg = JSON.parse(data.toString())
 
         // Binance aggTrade format:
@@ -136,14 +162,51 @@ export class BinanceOracle {
       } catch {}
     })
 
+    this.ws.on('ping', () => this.ws?.pong())
+
     this.ws.on('close', () => {
-      console.log('⚠️ Binance Futures disconnected — reconnecting in 2s...')
-      this.reconnectTimer = setTimeout(() => this.connect(), 2000)
+      this.stopHeartbeat()
+      const delay = this.getReconnectDelay()
+      console.log(`⚠️ Binance Futures disconnected — reconnecting in ${delay/1000}s (attempt ${this.reconnectAttempts})...`)
+      this.reconnectTimer = setTimeout(() => this.connect(), delay)
     })
 
     this.ws.on('error', (err) => {
       console.error('❌ Binance Futures WS error:', err.message)
     })
+  }
+
+  private getReconnectDelay(): number {
+    // Exponential backoff: 2s, 4s, 8s, 16s, 30s max
+    const delay = Math.min(2000 * Math.pow(2, this.reconnectAttempts), 30000)
+    this.reconnectAttempts++
+    return delay
+  }
+
+  private startHeartbeat() {
+    this.stopHeartbeat()
+    this.heartbeatTimer = setInterval(() => this.checkConnectionHealth(), this.HEARTBEAT_INTERVAL_MS)
+  }
+
+  private stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+    }
+  }
+
+  private checkConnectionHealth() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+
+    const timeSinceLastMessage = Date.now() - this.lastMessageTime
+
+    if (timeSinceLastMessage > this.STALE_CONNECTION_MS) {
+      console.warn(`⚠️ Stale Binance WS connection (${timeSinceLastMessage}ms since last message) — forcing reconnect`)
+      this.ws.close()
+      return
+    }
+
+    this.ws.ping()
   }
 
   private onTrade(price: number, time: number) {

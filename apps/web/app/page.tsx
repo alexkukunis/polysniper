@@ -601,8 +601,8 @@ export default function Dashboard() {
           {[
             { label: 'Orders Fired', value: botState.ordersPlaced, color: 'text-white' },
             { label: 'Fills', value: botState.fillsReceived, color: 'text-emerald-400' },
-            { label: 'Inv YES', value: `${botState.inventoryYes}/5`, color: 'text-white' },
-            { label: 'Inv NO', value: `${botState.inventoryNo}/5`, color: 'text-white' },
+            { label: 'Inv YES', value: `${botState.inventoryYes}/20`, color: 'text-white' },
+            { label: 'Inv NO', value: `${botState.inventoryNo}/20`, color: 'text-white' },
             { label: 'Exit Config', value: `${botState.maxHoldSeconds}s / $${botState.stopLossBtcUsd} / ${botState.takeProfitCents}¢`, color: 'text-gray-400' },
           ].map(s => (
             <div key={s.label} className="bg-[#111] border border-white/5 rounded-lg p-3 text-center">

@@ -24,9 +24,9 @@ if (!validation.valid) {
   process.exit(1)
 }
 console.log('')  // Add spacing after validation output
-const spikeThreshold = parseInt(process.env.SPIKE_THRESHOLD || '50')
+const spikeThreshold = parseInt(process.env.SPIKE_THRESHOLD || '20')
 const spikeWindowMs = parseInt(process.env.SPIKE_WINDOW_MS || '2000')
-const minEdgeCents = parseInt(process.env.MIN_EDGE_CENTS || '3')  // Raised from 1 to 3 (covers fees)
+const minEdgeCents = parseInt(process.env.MIN_EDGE_CENTS || '1')  // Loose: 1¢ edge minimum
 
 // Exit strategy config (tweak these before going live!)
 const maxHoldSeconds = parseInt(process.env.MAX_HOLD_SECONDS || '30')

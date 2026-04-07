@@ -48,6 +48,7 @@ export class WebSocketBridge {
   private cfg: KalshiWSConfig
   private running = false
   private reconnectTimer: NodeJS.Timeout | null = null
+  private reconnectAttempts = 0
   private marketMeta = new Map<string, MarketMeta>()
   private port: number
 
@@ -59,11 +60,34 @@ export class WebSocketBridge {
   // Pending messages for new clients
   private pendingMessages: any[] = []
 
+  // ── Heartbeat / Connection Health ──
+  private heartbeatTimer: NodeJS.Timeout | null = null
+  private lastMessageTime = 0
+  private readonly HEARTBEAT_INTERVAL_MS = 15000  // Ping every 15s
+  private readonly STALE_CONNECTION_MS = 45000    // Reconnect if no data for 45s
+
   constructor(port: number, path: string, cfg: KalshiWSConfig) {
     this.port = port
     this.cfg = cfg
     this.server = http.createServer()
-    this.wss = new WebSocketServer({ server: this.server, path })
+    this.wss = new WebSocketServer({ 
+      server: this.server, 
+      path,
+      perMessageDeflate: {
+        zlibDeflateOptions: {
+          chunkSize: 1024,
+          memLevel: 7,
+          level: 6,
+        },
+        zlibInflateOptions: {
+          chunkSize: 10 * 1024,
+        },
+        clientNoContextTakeover: true,
+        serverNoContextTakeover: true,
+        serverMaxWindowBits: 15,
+        threshold: 256, // Only compress messages > 256 bytes
+      },
+    })
   }
 
   async start() {
@@ -94,6 +118,7 @@ export class WebSocketBridge {
   stop() {
     this.running = false
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.stopHeartbeat()
     if (this.kalshiWs) this.kalshiWs.close()
     this.clients.forEach((c) => c.close())
     this.server.close()
@@ -200,6 +225,13 @@ export class WebSocketBridge {
 
   // ── Internal: Kalshi WS connection ──
 
+  private getReconnectDelay(): number {
+    // Exponential backoff: 3s, 6s, 12s, 24s, 48s, 60s max
+    const delay = Math.min(3000 * Math.pow(2, this.reconnectAttempts), 60000)
+    this.reconnectAttempts++
+    return delay
+  }
+
   private connectKalshi() {
     const url = this.cfg.demo ? DEMO_WS : PROD_WS
     const { ts, sig } = this.sign()
@@ -212,11 +244,27 @@ export class WebSocketBridge {
         'KALSHI-ACCESS-TIMESTAMP': ts,
         'KALSHI-ACCESS-SIGNATURE': sig,
       },
+      perMessageDeflate: {
+        zlibDeflateOptions: {
+          chunkSize: 1024,
+          memLevel: 7,
+          level: 6,
+        },
+        zlibInflateOptions: {
+          chunkSize: 10 * 1024,
+        },
+        clientNoContextTakeover: true,
+        serverNoContextTakeover: true,
+        threshold: 256,
+      },
     })
 
     this.kalshiWs.on('open', () => {
       console.log('✅ Connected to Kalshi WebSocket')
       this.running = true
+      this.reconnectAttempts = 0  // Reset counter on successful connection
+      this.lastMessageTime = Date.now()
+      this.startHeartbeat()
       // Subscribe to public channels first
       this.subscribe()
       // Subscribe to orderbook_delta immediately — no artificial delay
@@ -229,6 +277,7 @@ export class WebSocketBridge {
 
     this.kalshiWs.on('message', (data: Buffer) => {
       try {
+        this.lastMessageTime = Date.now()
         const msg = JSON.parse(data.toString())
         // All logging handled in handleMessage()
         this.handleMessage(msg)
@@ -238,10 +287,12 @@ export class WebSocketBridge {
     })
 
     this.kalshiWs.on('close', () => {
-      console.log('⚠️ Kalshi WS disconnected — reconnecting in 3s...')
       this.running = false
       this.orderbookReady = false
-      this.reconnectTimer = setTimeout(() => this.connectKalshi(), 3000)
+      this.stopHeartbeat()
+      const delay = this.getReconnectDelay()
+      console.log(`⚠️ Kalshi WS disconnected — reconnecting in ${delay/1000}s (attempt ${this.reconnectAttempts})...`)
+      this.reconnectTimer = setTimeout(() => this.connectKalshi(), delay)
     })
 
     this.kalshiWs.on('error', (err) => {
@@ -303,10 +354,6 @@ export class WebSocketBridge {
     if (msg.type === 'orderbook_delta' || (msg.channel === 'orderbook_delta' && msg.data)) {
       const data = msg.data || msg.msg
       if (data) {
-        // Only log the first few deltas for debugging
-        if (!this.orderbookReady || !this.orderbook || this.orderbook.yesBook.size === 0) {
-          console.log('📖 Orderbook delta (debug):', JSON.stringify(data).substring(0, 300))
-        }
         this.updateOrderbook(data)
         const enriched = this.enrichOrderbookMessage(data)
         if (enriched) this.broadcast(enriched)
@@ -344,11 +391,7 @@ export class WebSocketBridge {
       return
     }
 
-    console.log('📖 Processing orderbook snapshot...')
-    console.log('   Snapshot data keys:', Object.keys(snapshotData).join(','))
-    
     const ticker = snapshotData.market_ticker || ''
-    console.log(`   Market: ${ticker}`)
 
     // Clear existing orderbook
     this.orderbook = {
@@ -363,7 +406,6 @@ export class WebSocketBridge {
     // Kalshi official format: yes_dollars_fp = [["price", "count"], ...]
     // Priority 1: Official Kalshi format (array of [price, count] tuples)
     if (snapshotData.yes_dollars_fp && Array.isArray(snapshotData.yes_dollars_fp)) {
-      console.log(`   Using yes_dollars_fp format - YES levels: ${snapshotData.yes_dollars_fp.length}`)
       for (const [price, count] of snapshotData.yes_dollars_fp) {
         if (price && count !== '0.00' && parseFloat(count) > 0) {
           this.orderbook.yesBook.set(price.toString(), count.toString())
@@ -372,7 +414,6 @@ export class WebSocketBridge {
     }
     // Fallback 1: { yes: [[price, count], ...] }
     else if (snapshotData.yes && Array.isArray(snapshotData.yes)) {
-      console.log(`   Using yes array format - YES levels: ${snapshotData.yes.length}`)
       for (const [price, count] of snapshotData.yes) {
         if (price && count !== '0.00' && parseFloat(count) > 0) {
           this.orderbook.yesBook.set(price.toString(), count.toString())
@@ -381,7 +422,6 @@ export class WebSocketBridge {
     }
     // Fallback 2: { yes_dollars: { bids: [...] } }
     else if (snapshotData.yes_dollars?.bids) {
-      console.log(`   Using yes_dollars.bids format - YES levels: ${snapshotData.yes_dollars.bids.length}`)
       for (const level of snapshotData.yes_dollars.bids) {
         const price = level.price_dollars || level.price
         const count = level.count_fp || level.count
@@ -394,7 +434,6 @@ export class WebSocketBridge {
     // Kalshi official format: no_dollars_fp = [["price", "count"], ...]
     // Priority 1: Official Kalshi format
     if (snapshotData.no_dollars_fp && Array.isArray(snapshotData.no_dollars_fp)) {
-      console.log(`   Using no_dollars_fp format - NO levels: ${snapshotData.no_dollars_fp.length}`)
       for (const [price, count] of snapshotData.no_dollars_fp) {
         if (price && count !== '0.00' && parseFloat(count) > 0) {
           this.orderbook.noBook.set(price.toString(), count.toString())
@@ -403,7 +442,6 @@ export class WebSocketBridge {
     }
     // Fallback 1: { no: [[price, count], ...] }
     else if (snapshotData.no && Array.isArray(snapshotData.no)) {
-      console.log(`   Using no array format - NO levels: ${snapshotData.no.length}`)
       for (const [price, count] of snapshotData.no) {
         if (price && count !== '0.00' && parseFloat(count) > 0) {
           this.orderbook.noBook.set(price.toString(), count.toString())
@@ -426,7 +464,7 @@ export class WebSocketBridge {
 
     const yesAsk = this.getYesAskCents()
     const yesBid = this.getYesBidCents()
-    console.log(`✅ Orderbook snapshot loaded: YES bid=${yesBid}¢ ask=${yesAsk}¢ | YES levels: ${this.orderbook.yesBook.size} | NO levels: ${this.orderbook.noBook.size}`)
+    console.log(`✅ Orderbook snapshot loaded: YES bid=${yesBid}¢ ask=${yesAsk}¢ | YES=${this.orderbook.yesBook.size} levels | NO=${this.orderbook.noBook.size} levels`)
 
     // Broadcast the snapshot to dashboard
     const enriched = this.enrichOrderbookMessage(snapshotData)
@@ -446,9 +484,6 @@ export class WebSocketBridge {
 
     // Snapshot — initialize the book with full state
     if (hasBatchStructure && (data.is_snapshot || !this.orderbook)) {
-      console.log('📖 Initializing orderbook from snapshot...')
-      console.log('   Snapshot keys:', Object.keys(data).join(', '))
-      
       this.orderbook = {
         ticker,
         title: this.marketMeta.get(ticker)?.title || ticker,
@@ -460,7 +495,6 @@ export class WebSocketBridge {
 
       // Apply YES side levels
       if (data.yes_dollars?.bids) {
-        console.log(`   YES bids from snapshot: ${data.yes_dollars.bids.length} levels`)
         for (const level of data.yes_dollars.bids) {
           const price = level.price_dollars || level.price
           const count = level.count_fp || level.count
@@ -470,9 +504,8 @@ export class WebSocketBridge {
         }
       }
 
-      // Apply NO side levels  
+      // Apply NO side levels
       if (data.no_dollars?.bids) {
-        console.log(`   NO bids from snapshot: ${data.no_dollars.bids.length} levels`)
         for (const level of data.no_dollars.bids) {
           const price = level.price_dollars || level.price
           const count = level.count_fp || level.count
@@ -486,11 +519,10 @@ export class WebSocketBridge {
 
       const yesAsk = this.getYesAskCents()
       const yesBid = this.getYesBidCents()
-      console.log(`✅ Orderbook ready (snapshot): YES bid=${yesBid}¢ ask=${yesAsk}¢ | YES levels: ${this.orderbook.yesBook.size} | NO levels: ${this.orderbook.noBook.size}`)
+      console.log(`✅ Orderbook ready: YES bid=${yesBid}¢ ask=${yesAsk}¢ | YES=${this.orderbook.yesBook.size} | NO=${this.orderbook.noBook.size}`)
     } else if (hasIndividualDelta) {
       // Individual delta format: { market_ticker, price_dollars, count_fp, side, ... }
       if (!this.orderbook) {
-        console.log(`📖 Initializing orderbook from first delta (no snapshot): ${ticker}`)
         this.orderbook = {
           ticker,
           title: this.marketMeta.get(ticker)?.title || ticker,
@@ -507,23 +539,19 @@ export class WebSocketBridge {
       }
 
       // Apply individual delta to the correct book
-      // Kalshi format: { price_dollars, delta_fp, side, ... }
-      const side = data.side // 'yes' or 'no'
+      const side = data.side
       const price = data.price_dollars || data.price
       const delta = data.delta_fp || data.count_fp || data.count
 
       if (price) {
         const book = side === 'yes' ? this.orderbook.yesBook : this.orderbook.noBook
         const deltaValue = parseFloat(delta)
-        
+
         if (deltaValue === 0) {
-          // Level removed
           book.delete(price)
         } else if (deltaValue > 0) {
-          // Add/update level
           book.set(price, delta.toString())
         } else {
-          // Negative delta - reduce existing level
           const existing = parseFloat(book.get(price) || '0')
           const newCount = existing + deltaValue
           if (newCount <= 0) {
@@ -537,12 +565,10 @@ export class WebSocketBridge {
       // Mark as ready after first delta
       if (!this.orderbookReady) {
         this.orderbookReady = true
-        console.log(`✅ Orderbook ready (from individual deltas): YES levels=${this.orderbook.yesBook.size}, NO levels=${this.orderbook.noBook.size}`)
       }
     } else if (hasBatchStructure) {
       // Batch delta format with yes_dollars/no_dollars arrays
       if (!this.orderbook) {
-        console.log(`📖 Initializing orderbook from batch delta: ${ticker}`)
         this.orderbook = {
           ticker,
           title: this.marketMeta.get(ticker)?.title || ticker,
@@ -573,7 +599,6 @@ export class WebSocketBridge {
       // Mark as ready after first delta
       if (!this.orderbookReady) {
         this.orderbookReady = true
-        console.log(`✅ Orderbook ready (from batch deltas): YES levels=${this.orderbook.yesBook.size}, NO levels=${this.orderbook.noBook.size}`)
       }
     }
   }
@@ -684,6 +709,38 @@ export class WebSocketBridge {
 
     return { type: msg.channel || 'unknown', time: new Date().toISOString(), raw: msg }
   }
+
+  // ── Heartbeat / Connection Health ──
+
+  private startHeartbeat() {
+    this.stopHeartbeat()
+    this.heartbeatTimer = setInterval(() => this.checkConnectionHealth(), this.HEARTBEAT_INTERVAL_MS)
+  }
+
+  private stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+    }
+  }
+
+  private checkConnectionHealth() {
+    if (!this.kalshiWs || this.kalshiWs.readyState !== WebSocket.OPEN) return
+
+    const timeSinceLastMessage = Date.now() - this.lastMessageTime
+
+    // Check if connection is stale (no messages received)
+    if (timeSinceLastMessage > this.STALE_CONNECTION_MS) {
+      console.warn(`⚠️ Stale Kalshi WS connection (${timeSinceLastMessage}ms since last message) — forcing reconnect`)
+      this.kalshiWs.close()
+      return
+    }
+
+    // Send ping to keep connection alive and measure latency
+    this.kalshiWs.ping()
+  }
+
+  // ── Auth ──
 
   private sign() {
     const ts = Date.now().toString()

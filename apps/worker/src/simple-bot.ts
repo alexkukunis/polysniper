@@ -19,10 +19,10 @@ import { KalshiAPI } from './kalshi-api'
 import { WebSocketBridge } from './ws-bridge'
 import { BinanceOracle, PriceEvent } from './coinbase'
 
-// Kalshi fee: ~1% of contract value per leg (maker), ~3% (taker).
-// For a 50¢ contract, taker fee ≈ 1.5¢ per leg → ~3¢ round-trip.
-// We use 2¢ as a conservative estimate.
-const KALSHI_FEE_CENTS_PER_LEG = 2
+// Kalshi fee: disabled for loose testing mode
+// Normally ~1% of contract value per leg (maker), ~3% (taker).
+// Set to 0 to allow maximum trade frequency during testing.
+const KALSHI_FEE_CENTS_PER_LEG = 0
 const ROUND_TRIP_FEE_CENTS = KALSHI_FEE_CENTS_PER_LEG * 2
 
 // When crossing spread for stop-loss exits, how many cents to concede
@@ -145,7 +145,7 @@ export class LatencySniper {
   // Inventory tracking
   private inventoryYes = 0
   private inventoryNo = 0
-  private readonly MAX_INVENTORY = 5
+  private readonly MAX_INVENTORY = 20  // Increased from 5 for more trade volume
 
   // Rate limiting
   private readonly ORDER_THROTTLE_MS = 100
@@ -287,11 +287,11 @@ export class LatencySniper {
     console.log(`  Dry Run:        ${this.cfg.dryRun ? 'YES (no real orders)' : 'NO (live execution)'}`)
     console.log(`  Target Market:  ${this.cfg.btcMarketTicker}`)
     console.log(`  Price Feed:     Binance Futures BTC/USDT (aggTrade)`)
-    console.log(`  Trigger:        $25 in 2000ms`)
+    console.log(`  Trigger:        $${this.cfg.oracle.thresholdUsd} in ${this.cfg.oracle.windowMs}ms`)
     console.log(`  Min Edge:       ${this.cfg.minEdgeCents}¢ + fees`)
     console.log(`  Round-trip fee: ~${ROUND_TRIP_FEE_CENTS}¢ (estimated)`)
     console.log(`  Order Size:     1 contract (hardcoded)`)
-    console.log(`  Max Inventory:  ${this.MAX_INVENTORY} per side`)
+    console.log(`  Max Inventory:  ${this.MAX_INVENTORY} per side (loose mode)`)
     console.log(`  Exits:          Event-driven (every tick)`)
     console.log('='.repeat(60) + '\n')
 
@@ -539,44 +539,15 @@ export class LatencySniper {
     // ── Event-driven exit check on every tick ──
     await this.checkOpenPositions()
 
-    // ── Momentum filter: 30s trend must confirm 2s spike direction ──
+    // ── Momentum filter: softened to warning only (allows more trades) ──
+    // Previously: hard skip on 30s divergence. Now: just log and proceed.
     const momentum = this.getMomentumContext()
     if (momentum.change30s !== null) {
       if (direction === 'spike' && momentum.change30s < 0) {
-        console.log(`   ⏭️ Momentum divergence: 2s spike +$${event.change.toFixed(0)} but 30s change $${momentum.change30s.toFixed(0)} — dead cat bounce, skipping`)
-        this.addAudit({
-          btcPrice: event.price,
-          trigger: `BTC Spike +$${event.change.toFixed(0)}`,
-          action: 'Skipped (momentum divergence)',
-          status: 'canceled',
-          edge: 0,
-          skipReason: 'momentum_divergence',
-          latencyMs: 0,
-          momentumContext: momentum,
-          edgeExplanation: `2s ↑$${event.change.toFixed(0)} but 30s ↓$${Math.abs(momentum.change30s).toFixed(0)}`,
-          yesAskAtDecision: yesAsk,
-          yesBidAtDecision: yesBid,
-          dynamicMinEdge: this.computeDynamicMinEdge(spread),
-        })
-        return
+        console.log(`   ⚠️ Momentum divergence: 2s spike +$${event.change.toFixed(0)} but 30s change $${momentum.change30s.toFixed(0)} — proceeding anyway (loose mode)`)
       }
       if (direction === 'drop' && momentum.change30s > 0) {
-        console.log(`   ⏭️ Momentum divergence: 2s drop -$${Math.abs(event.change).toFixed(0)} but 30s change +$${momentum.change30s.toFixed(0)} — reversal spike, skipping`)
-        this.addAudit({
-          btcPrice: event.price,
-          trigger: `BTC Drop -$${Math.abs(event.change).toFixed(0)}`,
-          action: 'Skipped (momentum divergence)',
-          status: 'canceled',
-          edge: 0,
-          skipReason: 'momentum_divergence',
-          latencyMs: 0,
-          momentumContext: momentum,
-          edgeExplanation: `2s ↓$${Math.abs(event.change).toFixed(0)} but 30s ↑$${momentum.change30s.toFixed(0)}`,
-          yesAskAtDecision: yesAsk,
-          yesBidAtDecision: yesBid,
-          dynamicMinEdge: this.computeDynamicMinEdge(spread),
-        })
-        return
+        console.log(`   ⚠️ Momentum divergence: 2s drop -$${Math.abs(event.change).toFixed(0)} but 30s change +$${momentum.change30s.toFixed(0)} — proceeding anyway (loose mode)`)
       }
     }
 

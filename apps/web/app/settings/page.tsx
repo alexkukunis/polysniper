@@ -8,9 +8,9 @@ export default function SettingsPage() {
   const [demo, setDemo] = useState(true)
   const [dryRun, setDryRun] = useState(true)
   const [btcTicker, setBtcTicker] = useState('')
-  const [spikeThreshold, setSpikeThreshold] = useState(25)
+  const [spikeThreshold, setSpikeThreshold] = useState(20)
   const [spikeWindowMs, setSpikeWindowMs] = useState(2000)
-  const [minEdgeCents, setMinEdgeCents] = useState(3)
+  const [minEdgeCents, setMinEdgeCents] = useState(1)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -24,9 +24,9 @@ export default function SettingsPage() {
         setDemo(data.demo !== false)
         setDryRun(data.dryRun !== false)
         setBtcTicker(data.btcTicker || '')
-        setSpikeThreshold(data.spikeThreshold || 25)
+        setSpikeThreshold(data.spikeThreshold || 20)
         setSpikeWindowMs(data.spikeWindowMs || 2000)
-        setMinEdgeCents(data.minEdgeCents || 2)
+        setMinEdgeCents(data.minEdgeCents ?? 1)
         setLoaded(true)
       })
       .catch(() => setLoaded(true))
@@ -214,7 +214,7 @@ export default function SettingsPage() {
                 <p className="text-xs text-blue-400">
                   <strong>Safety Rails (hardcoded):</strong><br/>
                   • 1 contract per order (micro-lot)<br/>
-                  • Max 5 contracts per side<br/>
+                  • Max 20 contracts per side (loose mode)<br/>
                   • 100ms throttle between orders<br/>
                   • IOC orders (take liquidity, never rest)
                 </p>
