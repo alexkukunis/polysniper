@@ -1,289 +1,201 @@
-import { KalshiRestClient, MarketInfo } from './kalshi-rest'
-import { EventEmitter } from 'events'
+/**
+ * Market Selector — Auto-find the At-The-Money (ATM) BTC market
+ *
+ * Kalshi lists dozens of BTC strike prices. We want the one closest
+ * to the current spot price — highest volatility and liquidity.
+ *
+ * Active BTC series:
+ * - KXBTC15M: 15-minute expiries (best for latency sniping)
+ * - KXBTCD: Daily expiries
+ *
+ * Boot sequence:
+ * 1. Get current BTC spot price from Coinbase
+ * 2. Query Kalshi with series_ticker=KXBTC15M (fast-paced, best edge)
+ * 3. Extract strike price from ticker/subtitle
+ * 4. Select market with smallest |strike - spot| difference
+ */
 
-export interface MarketFilterConfig {
-  minVolume24h: number          // minimum 24h volume (contracts)
-  maxSpread: number             // max bid-ask spread in cents
-  minTteHours: number           // minimum time to expiration (hours)
-  maxTteDays: number            // maximum time to expiration (days)
-  minParticipants: number       // minimum unique participants
-  excludeCategories: string[]   // categories to skip entirely
-  scanIntervalMs: number        // how often to refresh whitelist
-}
+import { KalshiAPI } from './kalshi-api'
 
-export interface WhitelistedMarket {
+export interface SelectedMarket {
   ticker: string
-  eventTicker: string
   title: string
-  category: string
-  volume24h: number
-  yesBid: number
-  yesAsk: number
-  spread: number
-  midPrice: number
-  expirationTime: string
-  tteHours: number
-  liquidity: number
-  yesBids: Array<{ price: number; count: number }>
-  noBids: Array<{ price: number; count: number }>
+  strikePrice: number   // the strike in dollars (e.g. 70000)
+  currentPrice: number  // how it's priced on Kalshi (cents, ~50 = ATM)
+  distanceFromSpot: number  // $ difference from Binance spot
+  series: string        // KXBTC15M, KXBTCD, etc.
 }
 
-const DEFAULT_CONFIG: MarketFilterConfig = {
-  minVolume24h: 15_000,         // 15k contracts minimum
-  maxSpread: 4,                 // max 4¢ spread
-  minTteHours: 12,              // at least 12h until settlement
-  maxTteDays: 7,                // no more than 7 days out
-  minParticipants: 5,           // at least 5 participants (from orderbook depth)
-  excludeCategories: [],        // user-configurable
-  scanIntervalMs: 60_000,       // scan every 60s
+// Series to try, in priority order (fastest expiry first for sniping)
+const BTC_SERIES = ['KXBTC15M', 'KXBTCD', 'KXBTC']
+
+/**
+ * Find the ATM BTC market.
+ *
+ * @param kalshi Kalshi API instance (must be authenticated)
+ * @param btcSpotPrice Current BTC/USDT spot price from Coinbase
+ * @returns The best market to target, or null if none found
+ */
+export async function selectAtmMarket(
+  kalshi: KalshiAPI,
+  btcSpotPrice: number,
+): Promise<SelectedMarket | null> {
+  console.log(`\n🎯 Market Selector — Finding ATM BTC market (spot: $${btcSpotPrice.toLocaleString()})`)
+
+  // Try each BTC series in priority order
+  for (const series of BTC_SERIES) {
+    console.log(`   Trying series: ${series}...`)
+    const markets = await kalshi.getMarkets('open', 100, 3, series)
+    console.log(`   Fetched ${markets.length} open markets from ${series}`)
+
+    if (markets.length === 0) continue
+
+    // Log close times for debugging
+    if (markets.length > 0 && markets[0].close_time) {
+      const sample = markets[0]
+      const closeTime = typeof sample.close_time === 'string' 
+        ? sample.close_time 
+        : new Date(sample.close_time * 1000).toISOString()
+      console.log(`   Sample close time: ${closeTime}`)
+    }
+
+    // Parse strikes and find closest to spot
+    const candidates = parseBtcMarkets(markets, series, btcSpotPrice)
+    console.log(`   ${candidates.length} active candidates after close_time filter`)
+
+    if (candidates.length > 0) {
+      // Sort by distance from spot price (closest first)
+      candidates.sort((a, b) => a.distanceFromSpot - b.distanceFromSpot)
+      const selected = candidates[0]
+
+      console.log(`\n   ✅ Selected ATM Market:`)
+      console.log(`      Ticker:  ${selected.ticker}`)
+      console.log(`      Series:  ${selected.series}`)
+      console.log(`      Strike:  $${selected.strikePrice.toLocaleString()}`)
+      console.log(`      Spot:    $${btcSpotPrice.toLocaleString()}`)
+      console.log(`      Distance: $${selected.distanceFromSpot.toLocaleString()}`)
+      console.log(`      Kalshi Price: ${selected.currentPrice}¢`)
+
+      // Show nearby markets for context
+      if (candidates.length > 1) {
+        console.log(`\n   ── Nearby markets ──`)
+        candidates.slice(1, 4).forEach((c, i) => {
+          console.log(`      ${i + 2}. ${c.ticker} | Strike: $${c.strikePrice.toLocaleString()} | Distance: $${c.distanceFromSpot.toLocaleString()} | Price: ${c.currentPrice}¢`)
+        })
+      }
+
+      return selected
+    }
+  }
+
+  // If we get here, no BTC markets found in any series
+  console.log('   ⚠️ No open BTC markets found in any series: ' + BTC_SERIES.join(', '))
+  return null
 }
 
 /**
- * MarketSelector — scans Kalshi markets and filters to a whitelist
- * suitable for market making.
+ * Parse BTC market tickers and extract strike prices.
  *
- * Filtering criteria:
- * - volume_24h > threshold (liquidity)
- * - spread ≤ maxSpread (tight enough for profitable quoting)
- * - TTE between minTteHours and maxTteDays (not settling soon, not too far out)
- * - orderbook depth ≥ minParticipants (real liquidity, not spoof)
- * - excluded categories skipped
+ * KXBTC15M ticker format: KXBTC15M-26APR062030-30
+ *   (last segment is NOT a dollar strike — it's an internal ID)
+ *
+ * Strike prices are in the API response fields:
+ *   floor_strike: 68965.34  (the actual BTC price level)
+ *   strike_type: "greater_or_equal"
  */
-export class MarketSelector extends EventEmitter {
-  private config: MarketFilterConfig
-  private restClient: KalshiRestClient
-  private running = false
-  private whitelist: Map<string, WhitelistedMarket> = new Map()
-  private scanTimer: ReturnType<typeof setInterval> | null = null
+function parseBtcMarkets(
+  markets: any[],
+  series: string,
+  btcSpotPrice: number,
+): SelectedMarket[] {
+  const candidates: SelectedMarket[] = []
+  const now = Date.now()
+  const MIN_TIME_TO_EXPIRY_MS = 5 * 60 * 1000 // 5 minutes minimum
 
-  constructor(restClient: KalshiRestClient, config?: Partial<MarketFilterConfig>) {
-    super()
-    this.restClient = restClient
-    this.config = { ...DEFAULT_CONFIG, ...config }
-  }
+  for (const m of markets) {
+    const ticker = m.ticker || ''
 
-  /**
-   * Start periodic market scanning.
-   * Runs the filter loop every `scanIntervalMs`.
-   */
-  async start() {
-    if (this.running) return
-    this.running = true
-    console.log('🔍 MarketSelector starting...')
+    // CRITICAL: Filter out markets that have already closed or are about to close
+    // Kalshi may still return them as "open" even after close_time has passed
+    if (m.close_time) {
+      const closeTimeMs = typeof m.close_time === 'string'
+        ? new Date(m.close_time).getTime()
+        : m.close_time * 1000 // Convert seconds to ms if needed
+      const timeUntilClose = closeTimeMs - now
 
-    // Run immediately, then on interval
-    await this.scanAndFilter()
-    this.scanTimer = setInterval(() => this.scanAndFilter(), this.config.scanIntervalMs)
-  }
-
-  /**
-   * Stop the periodic scanner.
-   */
-  stop() {
-    this.running = false
-    if (this.scanTimer) {
-      clearInterval(this.scanTimer)
-      this.scanTimer = null
-    }
-    console.log('🛑 MarketSelector stopped')
-  }
-
-  /**
-   * Get current whitelist of qualified markets.
-   */
-  getWhitelist(): Map<string, WhitelistedMarket> {
-    return new Map(this.whitelist)
-  }
-
-  /**
-   * Get array of whitelisted tickers.
-   */
-  getTickers(): string[] {
-    return Array.from(this.whitelist.keys())
-  }
-
-  /**
-   * Main filter loop — fetches all active markets, applies filters,
-   * emits changes if whitelist updated.
-   */
-  private async scanAndFilter() {
-    if (!this.running) return
-
-    try {
-      const oldWhitelist = new Set(this.whitelist.keys())
-      this.whitelist.clear()
-
-      const markets = await this.fetchAllActiveMarkets()
-      console.log(`📊 Scanned ${markets.length} active markets`)
-
-      const qualified: WhitelistedMarket[] = []
-
-      for (const market of markets) {
-        if (this.shouldExclude(market)) continue
-        if (!this.passesVolumeFilter(market)) continue
-        if (!this.passesSpreadFilter(market)) continue
-        if (!this.passesTteFilter(market)) continue
-
-        const orderbook = await this.fetchOrderbookSafely(market.ticker)
-        if (!orderbook) continue
-
-        const yesBids = orderbook.yes || []
-        const noBids = orderbook.no || []
-
-        // Derive spread from orderbook
-        const bestYesBid = yesBids.length > 0 ? yesBids[0].price : 0
-        const bestNoBid = noBids.length > 0 ? noBids[0].price : 0
-
-        // Per Kalshi docs: NO price = 100 - YES price
-        // YES ask is implied from NO bid: yesAsk = 100 - noBid
-        const yesAsk = noBids.length > 0 ? 100 - noBids[0].price : 100
-        const spread = yesAsk - bestYesBid
-        const midPrice = (bestYesBid + yesAsk) / 2
-
-        // Check spread filter again with real orderbook data
-        if (spread > this.config.maxSpread || spread <= 0) continue
-
-        // Check participant count (from orderbook depth)
-        const uniqueYesPrices = new Set(yesBids.map(b => b.price)).size
-        const uniqueNoPrices = new Set(noBids.map(b => b.price)).size
-        if (uniqueYesPrices + uniqueNoPrices < this.config.minParticipants) continue
-
-        const tteMs = new Date(market.expiration_time).getTime() - Date.now()
-        const tteHours = tteMs / (1000 * 60 * 60)
-
-        const whitelisted: WhitelistedMarket = {
-          ticker: market.ticker,
-          eventTicker: market.event_ticker,
-          title: market.title,
-          category: market.category,
-          volume24h: market.volume_24h,
-          yesBid: bestYesBid,
-          yesAsk,
-          spread,
-          midPrice,
-          expirationTime: market.expiration_time,
-          tteHours,
-          liquidity: market.liquidity,
-          yesBids,
-          noBids,
-        }
-
-        this.whitelist.set(market.ticker, whitelisted)
-        qualified.push(whitelisted)
+      // Skip if market closed or closes within minimum time window
+      if (timeUntilClose < MIN_TIME_TO_EXPIRY_MS) {
+        const closeDate = new Date(closeTimeMs)
+        const minsLeft = Math.max(0, Math.round(timeUntilClose / 60000))
+        console.log(`   ⏭️ Skipping ${ticker} — closes in ${minsLeft}m (min: 5m)`)
+        continue
       }
+    }
 
-      // Diff to find additions/removals
-      const newTickers = qualified.filter(m => !oldWhitelist.has(m.ticker))
-      const removedTickers = [...oldWhitelist].filter(t => !this.whitelist.has(t))
+    let strike = 0
 
-      if (newTickers.length > 0 || removedTickers.length > 0) {
-        console.log(
-          `📋 Whitelist updated: ${qualified.length} markets ` +
-          `(+${newTickers.length} / -${removedTickers.length})`
-        )
-        if (newTickers.length > 0) {
-          this.emit('marketsAdded', newTickers.map(m => m.ticker))
+    // Priority 1: Use floor_strike from API response (most reliable)
+    if (m.floor_strike && typeof m.floor_strike === 'number' && m.floor_strike > 1000) {
+      strike = Math.round(m.floor_strike)
+    }
+    // Priority 2: Use cap_strike
+    else if (m.cap_strike && typeof m.cap_strike === 'number' && m.cap_strike > 1000) {
+      strike = Math.round(m.cap_strike)
+    }
+    // Priority 3: Try parsing last segment of ticker (fallback for daily markets)
+    else {
+      const parts = ticker.split('-')
+      const lastPart = parts[parts.length - 1]
+      strike = parseInt(lastPart)
+      if (isNaN(strike) || strike < 1000) {
+        // Check subtitle as last resort
+        const subtitle = m.subtitle || ''
+        const dollarMatch = subtitle.match(/\$?(\d{4,})/)
+        if (dollarMatch) {
+          strike = parseInt(dollarMatch[1])
+        } else {
+          continue  // Can't determine strike
         }
-        if (removedTickers.length > 0) {
-          this.emit('marketsRemoved', removedTickers)
-        }
-      } else {
-        console.log(`📋 Whitelist unchanged: ${qualified.length} markets`)
       }
-
-      this.emit('scanComplete', { count: qualified.length, markets: qualified })
-    } catch (err) {
-      console.error('❌ MarketSelector scan error:', err)
-      this.emit('scanError', err)
     }
+
+    const distance = Math.abs(btcSpotPrice - strike)
+
+    // Get current Kalshi price
+    const kalshiPrice = parseFloat(m.yes_bid_dollars || m.previous_yes_bid_dollars || '0') * 100
+
+    candidates.push({
+      ticker,
+      title: m.title || ticker,
+      series,
+      strikePrice: strike,
+      currentPrice: Math.round(kalshiPrice),
+      distanceFromSpot: distance,
+    })
   }
 
-  /**
-   * Fetch all active markets using cursor pagination.
-   * Per Kalshi docs: paginated with cursor, default limit 100.
-   */
-  private async fetchAllActiveMarkets(): Promise<MarketInfo[]> {
-    const allMarkets: MarketInfo[] = []
-    let cursor: string | undefined
+  return candidates
+}
 
-    do {
-      const response = await this.restClient.getMarkets({
-        status: 'open',
-        limit: 100,
-        cursor,
-      })
+/**
+ * Wait for Coinbase price feed to have a valid price.
+ * Event-driven: resolves the moment the first trade event arrives.
+ */
+export async function waitForBtcPrice(
+  oracle: { setPriceUpdateCallback: (cb: any) => void; getCurrentPrice: () => number },
+  maxWaitMs = 15000,
+): Promise<number> {
+  console.log(`   ⏳ Waiting for first BTC price from Coinbase...`)
 
-      allMarkets.push(...(response.markets || []))
-      cursor = response.cursor
-    } while (cursor)
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`Failed to get BTC price from Coinbase after ${maxWaitMs / 1000}s`))
+    }, maxWaitMs)
 
-    return allMarkets
-  }
-
-  /**
-   * Fetch orderbook for a single market, with error handling.
-   */
-  private async fetchOrderbookSafely(ticker: string) {
-    try {
-      return await this.restClient.getOrderbook(ticker)
-    } catch (err) {
-      console.warn(`⚠️ Failed to fetch orderbook for ${ticker}:`, (err as Error).message)
-      return null
-    }
-  }
-
-  /**
-   * Check if market should be excluded by category.
-   */
-  private shouldExclude(market: MarketInfo): boolean {
-    if (this.config.excludeCategories.includes(market.category)) {
-      console.log(`⏭️ Excluded by category: ${market.ticker} (${market.category})`)
-      return true
-    }
-    return false
-  }
-
-  /**
-   * Check minimum 24h volume.
-   */
-  private passesVolumeFilter(market: MarketInfo): boolean {
-    const passes = market.volume_24h >= this.config.minVolume24h
-    if (!passes) {
-      console.log(`⏭️ Low volume: ${market.ticker} (24h vol: ${market.volume_24h})`)
-    }
-    return passes
-  }
-
-  /**
-   * Check spread from market data (preliminary, refined later with orderbook).
-   */
-  private passesSpreadFilter(market: MarketInfo): boolean {
-    const bid = market.previous_yes_bid
-    const ask = market.previous_yes_ask
-    if (bid == null || ask == null) return false
-
-    const spread = ask - bid
-    const passes = spread <= this.config.maxSpread && spread > 0
-    if (!passes) {
-      console.log(`⏭️ Spread too wide: ${market.ticker} (spread: ${spread}¢)`)
-    }
-    return passes
-  }
-
-  /**
-   * Check time-to-expiration is within bounds.
-   */
-  private passesTteFilter(market: MarketInfo): boolean {
-    const tteMs = new Date(market.expiration_time).getTime() - Date.now()
-    const tteHours = tteMs / (1000 * 60 * 60)
-    const tteDays = tteHours / 24
-
-    const passes = tteHours >= this.config.minTteHours && tteDays <= this.config.maxTteDays
-    if (!passes) {
-      console.log(
-        `⏭️ TTE out of range: ${market.ticker} (${tteHours.toFixed(1)}h)`
-      )
-    }
-    return passes
-  }
+    // Resolve the moment the first trade event arrives
+    oracle.setPriceUpdateCallback((price: number) => {
+      clearTimeout(timeout)
+      resolve(price)
+    })
+  })
 }
