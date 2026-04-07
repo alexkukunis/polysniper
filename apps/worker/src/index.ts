@@ -1,6 +1,7 @@
-import { resolve } from 'path'
-import { config } from 'dotenv'
-config({ path: resolve(__dirname, '../../../.env') })
+import { loadEnv, getKalshiPrivateKey, validateKalshiCredentials } from './env'
+
+// Load environment variables (local .env file or Railway-injected)
+loadEnv()
 
 import { WebSocketBridge } from './ws-bridge'
 import { LatencySniper } from './simple-bot'
@@ -11,9 +12,18 @@ import { selectAtmMarket, waitForBtcPrice } from './market-selector'
 // ── Configuration ──
 
 const key = process.env.KALSHI_ACCESS_KEY || ''
-const secret = process.env.KALSHI_PRIVATE_KEY || ''
+const secret = getKalshiPrivateKey()
 const demo = process.env.KALSHI_DEMO !== 'false'
 const dryRun = process.env.DRY_RUN !== 'false'  // Default: dry run for safety
+
+// Validate credentials on startup
+const validation = validateKalshiCredentials()
+if (!validation.valid) {
+  console.error('\n❌ Credential validation failed:')
+  validation.errors.forEach(err => console.error(`   • ${err}`))
+  process.exit(1)
+}
+console.log('')  // Add spacing after validation output
 const spikeThreshold = parseInt(process.env.SPIKE_THRESHOLD || '50')
 const spikeWindowMs = parseInt(process.env.SPIKE_WINDOW_MS || '2000')
 const minEdgeCents = parseInt(process.env.MIN_EDGE_CENTS || '3')  // Raised from 1 to 3 (covers fees)
