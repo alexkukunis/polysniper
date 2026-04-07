@@ -77,7 +77,7 @@ app.prepare().then(() => {
     })
   })
 
-  const PORT = process.env.PORT || 3000
+  const PORT = parseInt(process.env.PORT || '3000', 10)
   const HOST = '0.0.0.0'
   server.listen(PORT, HOST, () => {
     console.log(`🚀 Dashboard live at http://${HOST}:${PORT}`)
