@@ -80,8 +80,8 @@ export class WebSocketBridge {
     })
 
     await new Promise<void>((resolve) => {
-      this.server.listen(3002, () => {
-        console.log('🔌 WebSocket bridge listening on :3002')
+      this.server.listen(port, () => {
+        console.log(`🔌 WebSocket bridge listening on :${port}`)
         resolve()
       })
     })

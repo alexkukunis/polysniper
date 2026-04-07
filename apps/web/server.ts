@@ -11,7 +11,13 @@ const dev = process.env.NODE_ENV !== 'production'
 const app = next({ dev })
 const handle = app.getRequestHandler()
 
-const WORKER_WS = process.env.WORKER_WS_URL || 'ws://localhost:3002/ws'
+// In production (Railway), use internal DNS: ws://worker.railway.internal:3002/ws
+// In local dev, defaults to localhost:3002
+const WORKER_WS = process.env.WORKER_WS_URL || (
+  process.env.NODE_ENV === 'production'
+    ? 'ws://worker.railway.internal:3002/ws'
+    : 'ws://localhost:3002/ws'
+)
 
 app.prepare().then(() => {
   const server = createServer((req, res) => {

@@ -86,8 +86,9 @@ async function main() {
   // Initialize Kalshi API once (reused across market rotations)
   kalshi = new KalshiAPI(key, secret, demo)
 
-  // Step 1: Start WebSocket bridge
-  const bridge = new WebSocketBridge(3002, '/ws', {
+  // Step 1: Start WebSocket bridge (port configurable via WS_PORT env var)
+  const wsPort = parseInt(process.env.WS_PORT || '3002', 10)
+  const bridge = new WebSocketBridge(wsPort, '/ws', {
     key, secret, demo,
     onMarketSettled: (ticker: string, status: string) => {
       console.log(`\n🔄 Auto-rotation triggered: ${ticker} ${status}`)

@@ -73,3 +73,12 @@ We use a custom `server.ts` instead of the default Next.js server:
 4. Both share the same port (`PORT` env var)
 
 This means **one Railway service** handles both the web UI and real-time WebSocket updates — no separate WebSocket server needed.
+
+### Inter-Service WebSocket Communication
+
+The web service connects to the worker service via WebSocket to receive real-time trading events:
+
+- **Local dev:** `ws://localhost:3002/ws`
+- **Production (Railway):** `ws://worker.railway.internal:3002/ws`
+
+Railway services communicate via internal DNS (`<service-name>.railway.internal`). The `WORKER_WS_URL` env var can override this if needed. The web server acts as a WebSocket bridge: worker → web server → browser dashboard.
