@@ -51,8 +51,9 @@ app.prepare().then(() => {
   let dashboardClients = new Set<WebSocket>()
 
   function connectToWorker() {
-    console.log(`🔌 Connecting to worker: ${WORKER_WS}`)
-    workerWs = new WebSocket(WORKER_WS)
+    const url = WORKER_WS!  // We already validated this in production above
+    console.log(`🔌 Connecting to worker: ${url}`)
+    workerWs = new WebSocket(url)
 
     workerWs.on('open', () => {
       console.log('✅ Connected to worker')
